@@ -26,11 +26,12 @@ def _snapshot_shas() -> dict[int, str]:
     """manifest 是 append-only 日志，同一 year 取最后一条。"""
     out: dict[int, str] = {}
     if os.path.exists(MANIFEST):
-        for line in open(MANIFEST):
-            line = line.strip()
-            if line:
-                r = json.loads(line)
-                out[r["year"]] = r["sha256"]
+        with open(MANIFEST) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    r = json.loads(line)
+                    out[r["year"]] = r["sha256"]
     return out
 
 

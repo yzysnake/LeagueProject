@@ -2,7 +2,6 @@
 import importlib.util
 import os
 import shutil
-import sys
 from datetime import date
 
 import pytest
@@ -102,5 +101,5 @@ def test_winter_break_exempts_hard_fail(tmp_path, monkeypatch):
     p = tmp_path / "w.csv"
     shutil.copy(GOOD, p)
     # 假装今天是 1 月 20 日，而文件最后一场是去年 12 月 21 日（相隔 30 天）
-    rec, warns = dv.validate(str(p), 2014, {}, _date(2015, 1, 20))
+    rec, _warns = dv.validate(str(p), 2014, {}, _date(2015, 1, 20))
     assert rec["n_games"] == 918

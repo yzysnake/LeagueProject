@@ -1,0 +1,1915 @@
+# ============================================================================
+# 赛区 code 归一映射表（阶段 2 产出）
+#
+# 本文件由 scripts/audit_leagues.py 从 data/raw/ 全量重算生成，不要手改：
+#   .venv/bin/python scripts/audit_leagues.py
+# 改映射请改脚本里的 ALIASES / TIER，再重新生成。
+#
+# 依据 docs/PLAN.md §3.11.5（canonical 表 + UNKNOWN 兜底）、§9.5（赛区）、
+# §3.2.6（赛区集合与样本量）、§3.11.4（告警不阻塞）。
+# ============================================================================
+
+meta:
+  generated_by: scripts/audit_leagues.py
+  generated_at: "2026-09-19T04:03:27Z"
+  source_files: 13
+  data_first_date: "2014-01-14"
+  data_last_date: "2026-09-18"
+  total_games: 102084
+  n_raw_codes: 123
+  n_canonical: 106
+  n_codes_merged_away: 17
+  note: >-
+    场次按 gameid 去重统计；年份按 date 的日历年分桶，**不用 `year` 列**——实测 `year`
+    是赛季标签，与 date 不同年的行有 2 万余行（NA LCS 2014-09-09 的行 year=2015，
+    LTA N 2025-10-04 的行 year=2026），用它会把改名发生的年份算错。
+
+# ---------------------------------------------------------------------------
+# UNKNOWN 兜底策略（§3.11.5 要求显式写出；§3.11.4 要求告警不阻塞）
+# ---------------------------------------------------------------------------
+unknown_policy:
+  bucket: UNKNOWN
+  tier: 0
+  on_unregistered_code:
+    - 1. canon_league() 记 WARNING 并返回 UNKNOWN，**不抛异常**：新赛区上线不得让管道崩。
+    - 2. 该场比赛照常进 silver/训练，league_canon=UNKNOWN、league_tier=0。
+    - 3. UNKNOWN 桶是一个真实的 categorical level，不是 NaN；模型里它就是「没见过的小赛区」。
+    - 4. scripts/audit_leagues.py 以退出码 1 告警（CI 红），人工登记后重新生成本文件。
+    - 5. 绝不允许把 UNKNOWN 并进任何一线赛区，也绝不允许用 get_dummies 现场生成赛区特征。
+  forbidden:
+    - 任何地方都不得用原始 code 定义 tier-1：照抄 2024 的 code 过滤，2025 会丢 LTA N+LTA S 共 436 场；
+      照抄 2025 的 code 过滤，2026 会丢 LCS+CBLOL 共 482 场。两个方向都会静默丢一整年北美+巴西比赛。
+    - 不得对 UNKNOWN 做 assert/raise（§3.11.4：覆盖率监控绝不能做成启动 assert）。
+
+tier_definition:
+  "2": 国际赛 —— 参赛队来自 ≥3 个不同常规赛区的跨区赛事
+  "1": 一线赛区 —— 该赛季把队伍送上 WLDs/MSI/IWCI/MSC 的顶级地区联赛
+  "0": 二级 / 青训 / 业余 / 地区联赛 / 国内杯赛（含未知）
+  authority: >-
+    现役一线口径以已冻结的 eval/tier1_leagues.yaml 为准；该文件没覆盖到的历史赛区，
+    用「该赛季是否有队伍出现在 WLDs/MSI（原始队名精确匹配）」客观判定。
+    国内杯赛（DCup/KeSPA Cup/NEST）的参赛队虽然也进世界赛，但它们不是地区联赛，判 tier 0。
+
+# ---------------------------------------------------------------------------
+# 主表：raw league code -> {canon, tier, note}
+# tier 是 canon 的属性，这里冗余展开是为了让 silver 侧一次查表拿全。
+# ---------------------------------------------------------------------------
+leagues:
+  "AC":
+    canon: "AC"
+    tier: 0
+    games: 54
+    first_date: "2024-09-14"
+    last_date: "2026-03-08"
+    n_teams: 10
+    years: {"2024": 35, "2026": 19}
+    note: "美洲跨分区杯赛；2024 版是学院级(6 队)，2026 版是一线级(C9/FURIA/RED/Sentinels, 19 场)。冻结的 eval 口径未收录，故保持 tier 0，见 tier_open_questions"
+  "AL":
+    canon: "AL"
+    tier: 0
+    games: 968
+    first_date: "2023-02-01"
+    last_date: "2026-09-17"
+    n_teams: 22
+    years: {"2023": 173, "2024": 152, "2025": 293, "2026": 350}
+    note: "Arabian League，中东地区赛"
+  "AOL":
+    canon: "AOL"
+    tier: 0
+    games: 37
+    first_date: "2021-03-18"
+    last_date: "2021-03-26"
+    n_teams: 8
+    years: {"2021": 37}
+    note: "2021 北美学院邀请赛"
+  "ASCI":
+    canon: "ASCI"
+    tier: 0
+    games: 150
+    first_date: "2022-09-12"
+    last_date: "2023-09-15"
+    n_teams: 26
+    years: {"2022": 74, "2023": 76}
+    note: "亚洲青训跨区赛（LCKC/LDL/PCL 的二队）"
+  "ASI":
+    canon: "ASI"
+    tier: 2
+    games: 42
+    first_date: "2025-10-06"
+    last_date: "2025-10-12"
+    n_teams: 8
+    years: {"2025": 42}
+    note: "2025 亚洲邀请赛，8 队来自 LCK/LPL/LCP"
+  "Asia Master":
+    canon: "Asia Master"
+    tier: 0
+    games: 240
+    first_date: "2025-06-22"
+    last_date: "2026-06-21"
+    n_teams: 37
+    years: {"2025": 177, "2026": 63}
+    note: "亚洲青训跨区赛，2025 起"
+  "BIG":
+    canon: "BIG"
+    tier: 0
+    games: 343
+    first_date: "2019-01-22"
+    last_date: "2021-02-08"
+    n_teams: 58
+    years: {"2019": 179, "2020": 16, "2021": 148}
+    note: "北美业余/大学循环赛"
+  "BL":
+    canon: "BL"
+    tier: 0
+    games: 196
+    first_date: "2020-01-20"
+    last_date: "2021-10-09"
+    n_teams: 11
+    years: {"2020": 93, "2021": 103}
+    note: "比利时联赛 2020-2021，2022 与 DL 一同并入 ESLOL；N:1 合并不做别名"
+  "BM":
+    canon: "BM"
+    tier: 0
+    games: 243
+    first_date: "2019-07-07"
+    last_date: "2021-08-11"
+    n_teams: 20
+    years: {"2019": 38, "2020": 117, "2021": 88}
+    note: "波罗的海 Baltic Masters"
+  "BRCC":
+    canon: "BRCC"
+    tier: 0
+    games: 424
+    first_date: "2017-01-23"
+    last_date: "2020-08-15"
+    n_teams: 33
+    years: {"2017": 92, "2018": 82, "2019": 110, "2020": 140}
+    note: "巴西 Circuito Challenger 2017-2020"
+  "CBLOL":
+    canon: "CBLOL"
+    tier: 1
+    games: 2147
+    first_date: "2015-11-04"
+    last_date: "2026-09-13"
+    n_teams: 40
+    years: {"2015": 30, "2016": 161, "2017": 152, "2018": 188, "2019": 201, "2020": 196, "2021": 221, "2022": 243, "2023": 242, "2024": 263, "2026": 250}
+    note: "巴西一线"
+  "CBLOLA":
+    canon: "CBLOLA"
+    tier: 0
+    games: 961
+    first_date: "2021-01-19"
+    last_date: "2024-08-25"
+    n_teams: 20
+    years: {"2021": 221, "2022": 216, "2023": 248, "2024": 276}
+    note: "CBLOL Academy 2021-2024；与 CD@2025 归一化重叠仅 6/16=0.38，未达阈值，不合并"
+  "CCWS":
+    canon: "CCWS"
+    tier: 0
+    games: 40
+    first_date: "2026-01-20"
+    last_date: "2026-02-05"
+    n_teams: 11
+    years: {"2026": 40}
+    note: "2026 德语区跨赛区杯赛（PRM/PRMP 队伍）"
+  "CD":
+    canon: "CD"
+    tier: 0
+    games: 559
+    first_date: "2025-02-03"
+    last_date: "2026-09-14"
+    n_teams: 46
+    years: {"2025": 301, "2026": 258}
+    note: "巴西二级 2025-（Circuito Desafiante 系）；与 CBLOLA 关系见其 note"
+  "CDF":
+    canon: "CDF"
+    tier: 0
+    games: 217
+    first_date: "2022-10-17"
+    last_date: "2024-10-23"
+    n_teams: 43
+    years: {"2022": 76, "2023": 72, "2024": 69}
+    note: "法国杯 Coupe de France 2022-2024"
+  "CISC":
+    canon: "CISC"
+    tier: 0
+    games: 106
+    first_date: "2017-01-31"
+    last_date: "2018-08-22"
+    n_teams: 17
+    years: {"2017": 32, "2018": 74}
+    note: "独联体次级 2017-2018"
+  "CK":
+    canon: "CK"
+    tier: 0
+    games: 1392
+    first_date: "2016-01-18"
+    last_date: "2020-08-31"
+    n_teams: 42
+    years: {"2016": 199, "2017": 305, "2018": 291, "2019": 295, "2020": 302}
+    note: "Challengers Korea 2016-2020；与 LCKC@2021 队伍重叠 1/14=0.10（CK 是独立俱乐部，LCKC 是一线队青训），不合并"
+  "CLS":
+    canon: "CLS"
+    tier: 1
+    games: 580
+    first_date: "2016-02-04"
+    last_date: "2018-09-09"
+    n_teams: 15
+    years: {"2016": 174, "2017": 183, "2018": 223}
+    note: "2016-2018 拉美南部一线；与 LLA@2019 重叠 3/10=0.30，未达合并阈值"
+  "CT":
+    canon: "CT"
+    tier: 0
+    games: 240
+    first_date: "2019-11-29"
+    last_date: "2025-07-16"
+    n_teams: 44
+    years: {"2019": 8, "2020": 20, "2021": 54, "2022": 26, "2023": 43, "2024": 39, "2025": 50}
+    note: "西班牙 Circuito Tormenta 2019-2025"
+  "CU":
+    canon: "CU"
+    tier: 0
+    games: 209
+    first_date: "2020-07-27"
+    last_date: "2021-06-09"
+    n_teams: 31
+    years: {"2020": 5, "2021": 204}
+    note: "北美大学/业余 2020-2021"
+  "DCup":
+    canon: "DCup"
+    tier: 0
+    games: 661
+    first_date: "2016-06-29"
+    last_date: "2025-12-29"
+    n_teams: 72
+    years: {"2016": 74, "2017": 78, "2018": 97, "2019": 72, "2020": 62, "2021": 66, "2022": 75, "2023": 41, "2024": 18, "2025": 78}
+    note: "德玛西亚杯，中国国内杯赛（参赛队是 LPL 一线队，但不是国际赛）"
+  "DDH":
+    canon: "DDH"
+    tier: 0
+    games: 828
+    first_date: "2019-01-25"
+    last_date: "2023-03-31"
+    n_teams: 37
+    years: {"2019": 161, "2020": 157, "2021": 215, "2022": 209, "2023": 86}
+    note: "墨西哥次级 2019-2023"
+  "DL":
+    canon: "DL"
+    tier: 0
+    games: 198
+    first_date: "2020-01-21"
+    last_date: "2021-10-17"
+    n_teams: 7
+    years: {"2020": 97, "2021": 101}
+    note: "荷兰联赛 2020-2021，2022 并入 ESLOL；N:1 合并不做别名"
+  "EBL":
+    canon: "EBL"
+    tier: 0
+    games: 1277
+    first_date: "2019-01-28"
+    last_date: "2026-09-10"
+    n_teams: 53
+    years: {"2019": 134, "2020": 131, "2021": 141, "2022": 166, "2023": 159, "2024": 142, "2025": 191, "2026": 213}
+    note: "巴尔干 Esports Balkan League"
+  "EBLPA":
+    canon: "EBLPA"
+    tier: 0
+    games: 44
+    first_date: "2022-10-18"
+    last_date: "2024-10-25"
+    n_teams: 14
+    years: {"2022": 19, "2024": 25}
+    note: "EBL 次级/预选"
+  "EGL":
+    canon: "EGL"
+    tier: 0
+    games: 92
+    first_date: "2021-07-07"
+    last_date: "2021-07-28"
+    n_teams: 26
+    years: {"2021": 92}
+    note: "2021 北美业余"
+  "EL":
+    canon: "EL"
+    tier: 0
+    games: 176
+    first_date: "2022-01-24"
+    last_date: "2023-03-25"
+    n_teams: 12
+    years: {"2022": 135, "2023": 41}
+    note: "中美洲 Elite League 2022-2023"
+  "EM":
+    canon: "EM"
+    tier: 0
+    games: 1393
+    first_date: "2023-04-04"
+    last_date: "2026-06-15"
+    n_teams: 135
+    years: {"2023": 271, "2024": 399, "2025": 439, "2026": 284}
+    note: "EMEA Masters，2023 起"
+  "EPL":
+    canon: "EPL"
+    tier: 0
+    games: 236
+    first_date: "2023-06-08"
+    last_date: "2024-09-23"
+    n_teams: 16
+    years: {"2023": 86, "2024": 150}
+    note: "2023-2024 跨 ERL 邀请赛"
+  "ESLOL":
+    canon: "ROL"
+    tier: 0
+    games: 833
+    first_date: "2022-01-17"
+    last_date: "2024-11-10"
+    n_teams: 58
+    years: {"2022": 240, "2023": 302, "2024": 291}
+    note: "比荷卢：ESLOL(2022-2024)→ROL(2025-)；ESLOL@2024 vs ROL@2025 重叠 8/9=0.89"
+  "EU CS":
+    canon: "EU CS"
+    tier: 0
+    games: 506
+    first_date: "2014-02-14"
+    last_date: "2017-08-06"
+    n_teams: 84
+    years: {"2014": 87, "2015": 133, "2016": 144, "2017": 142}
+    note: "欧洲 Challenger Series 2014-2017（二级）"
+  "EU LCS":
+    canon: "LEC"
+    tier: 1
+    games: 1554
+    first_date: "2014-01-14"
+    last_date: "2018-09-09"
+    n_teams: 39
+    years: {"2014": 325, "2015": 247, "2016": 357, "2017": 393, "2018": 232}
+    note: "2014-2018 欧洲一线；EU LCS@2018 vs LEC@2019 重叠 6/10=0.60，LEC@2018 的 4 队全在 EU LCS@2018 内"
+  "EUM":
+    canon: "EM"
+    tier: 0
+    games: 948
+    first_date: "2018-04-09"
+    last_date: "2022-09-25"
+    n_teams: 113
+    years: {"2018": 141, "2019": 139, "2020": 260, "2021": 141, "2022": 267}
+    note: "EU Masters(2018-2022)→EMEA Masters(2023-)；归一化共享 15 个俱乐部（0.38）"
+  "EWC":
+    canon: "EWC"
+    tier: 2
+    games: 284
+    first_date: "2024-07-04"
+    last_date: "2026-07-19"
+    n_teams: 51
+    years: {"2024": 19, "2025": 33, "2026": 232}
+    note: "Esports World Cup，2024 起"
+  "FST":
+    canon: "FST"
+    tier: 2
+    games: 80
+    first_date: "2025-03-10"
+    last_date: "2026-03-22"
+    n_teams: 13
+    years: {"2025": 35, "2026": 45}
+    note: "First Stand，2025 新增（手册已证伪 'FS' 这个写法）"
+  "GL":
+    canon: "GL"
+    tier: 0
+    games: 271
+    first_date: "2021-08-23"
+    last_date: "2023-03-28"
+    n_teams: 23
+    years: {"2021": 8, "2022": 174, "2023": 89}
+    note: "拉美 Golden League 2021-2023"
+  "GLL":
+    canon: "HLL"
+    tier: 0
+    games: 1088
+    first_date: "2019-05-19"
+    last_date: "2024-07-30"
+    n_teams: 35
+    years: {"2019": 126, "2020": 227, "2021": 261, "2022": 156, "2023": 165, "2024": 153}
+    note: "希腊：GLL(2019-2024)→HLL(2025-)；GLL@2024 vs HLL@2025 归一化重叠 9/12=0.75"
+  "GLLPA":
+    canon: "GLLPA"
+    tier: 0
+    games: 85
+    first_date: "2022-10-11"
+    last_date: "2024-10-24"
+    n_teams: 24
+    years: {"2022": 47, "2024": 38}
+    note: "希腊次级/预选，与 GLL 同期并行，不合并"
+  "GPL":
+    canon: "GPL"
+    tier: 1
+    games: 138
+    first_date: "2016-04-07"
+    last_date: "2018-04-01"
+    n_teams: 18
+    years: {"2016": 50, "2017": 64, "2018": 24}
+    note: "2016-2018 东南亚一线，已停办"
+  "GSG":
+    canon: "GSG"
+    tier: 0
+    games: 53
+    first_date: "2021-03-08"
+    last_date: "2021-03-18"
+    n_teams: 12
+    years: {"2021": 53}
+    note: "2021 北美业余"
+  "HC":
+    canon: "HC"
+    tier: 0
+    games: 1013
+    first_date: "2020-07-09"
+    last_date: "2026-09-18"
+    n_teams: 50
+    years: {"2020": 76, "2021": 176, "2022": 162, "2023": 141, "2024": 111, "2025": 200, "2026": 147}
+    note: "捷克/斯洛伐克次级（队伍多为 HM 队的 Academy）"
+  "HLL":
+    canon: "HLL"
+    tier: 0
+    games: 456
+    first_date: "2025-01-21"
+    last_date: "2026-09-12"
+    n_teams: 18
+    years: {"2025": 221, "2026": 235}
+    note: "希腊二级，2025 起"
+  "HM":
+    canon: "HM"
+    tier: 0
+    games: 1259
+    first_date: "2019-02-17"
+    last_date: "2026-09-17"
+    n_teams: 35
+    years: {"2019": 94, "2020": 155, "2021": 179, "2022": 153, "2023": 162, "2024": 155, "2025": 190, "2026": 171}
+    note: "捷克/斯洛伐克一级国内联赛 Hitpoint Masters"
+  "HW":
+    canon: "HW"
+    tier: 0
+    games: 337
+    first_date: "2021-11-11"
+    last_date: "2026-03-07"
+    n_teams: 41
+    years: {"2021": 36, "2024": 84, "2025": 114, "2026": 103}
+    note: "捷克/斯洛伐克，与 HM 同期并行的另一赛事，不合并"
+  "IC":
+    canon: "IC"
+    tier: 0
+    games: 244
+    first_date: "2022-10-17"
+    last_date: "2025-11-22"
+    n_teams: 70
+    years: {"2022": 75, "2023": 73, "2024": 68, "2025": 28}
+    note: "**Iberian Cup**（西班牙 LVP SL + 葡萄牙 LPLOL 的跨国杯赛）。实测 2024/2025 参赛队全是西葡二级队，不是国际赛；eval/tier1_leagues.yaml 把它列进 international 是错的"
+  "IEM":
+    canon: "IEM"
+    tier: 2
+    games: 139
+    first_date: "2015-03-13"
+    last_date: "2017-02-26"
+    n_teams: 34
+    years: {"2015": 47, "2016": 65, "2017": 27}
+    note: "2015-2017 IEM 国际赛事，队伍来自 19 个其它 code"
+  "IGNIS":
+    canon: "IGNIS"
+    tier: 0
+    games: 55
+    first_date: "2024-05-07"
+    last_date: "2024-11-16"
+    n_teams: 13
+    years: {"2024": 55}
+    note: "2024 巴西青训"
+  "IWCI":
+    canon: "IWCI"
+    tier: 2
+    games: 40
+    first_date: "2016-04-16"
+    last_date: "2016-04-23"
+    n_teams: 8
+    years: {"2016": 40}
+    note: "2016 International Wildcard Invitational"
+  "KeSPA":
+    canon: "KeSPA Cup"
+    tier: 0
+    games: 353
+    first_date: "2015-11-06"
+    last_date: "2025-12-14"
+    n_teams: 69
+    years: {"2015": 34, "2016": 32, "2017": 45, "2018": 19, "2019": 36, "2020": 40, "2021": 42, "2024": 49, "2025": 56}
+    note: "韩国杯赛：KeSPA(2015-2025)→KeSPA Cup(2026)；重叠 10/10=1.00"
+  "KeSPA Cup":
+    canon: "KeSPA Cup"
+    tier: 0
+    games: 61
+    first_date: "2026-07-20"
+    last_date: "2026-08-18"
+    n_teams: 10
+    years: {"2026": 61}
+    note: "韩国杯赛 2026 当前 code；参赛队是 LCK 一线队，但属国内杯赛不是国际赛"
+  "LAS":
+    canon: "LAS"
+    tier: 0
+    games: 1871
+    first_date: "2020-11-28"
+    last_date: "2026-09-13"
+    n_teams: 24
+    years: {"2020": 74, "2021": 238, "2022": 227, "2023": 281, "2024": 289, "2025": 487, "2026": 275}
+    note: "**LCK Academy Series**（韩国一线队青训队），不是拉美赛区"
+  "LCK":
+    canon: "LCK"
+    tier: 1
+    games: 5477
+    first_date: "2015-09-11"
+    last_date: "2026-09-13"
+    n_teams: 35
+    years: {"2015": 8, "2016": 490, "2017": 510, "2018": 508, "2019": 496, "2020": 483, "2021": 488, "2022": 467, "2023": 488, "2024": 482, "2025": 555, "2026": 502}
+    note: "韩国一线，2015-09 起"
+  "LCKC":
+    canon: "LCKC"
+    tier: 0
+    games: 2664
+    first_date: "2021-01-18"
+    last_date: "2026-09-15"
+    n_teams: 11
+    years: {"2021": 226, "2022": 395, "2023": 499, "2024": 511, "2025": 542, "2026": 491}
+    note: "LCK Challengers League，2021 起"
+  "LCL":
+    canon: "LCL"
+    tier: 1
+    games: 897
+    first_date: "2016-01-16"
+    last_date: "2022-02-20"
+    n_teams: 27
+    years: {"2016": 156, "2017": 158, "2018": 156, "2019": 137, "2020": 125, "2021": 149, "2022": 16}
+    note: "2016-2022 独联体一线，已停办"
+  "LCO":
+    canon: "LCO"
+    tier: 1
+    games: 688
+    first_date: "2021-02-23"
+    last_date: "2024-07-22"
+    n_teams: 15
+    years: {"2021": 183, "2022": 212, "2023": 139, "2024": 154}
+    note: "2021-2024 大洋洲一线，2023 起失去世界赛席位，2024 停办"
+  "LCP":
+    canon: "LCP"
+    tier: 1
+    games: 574
+    first_date: "2025-01-17"
+    last_date: "2026-08-30"
+    n_teams: 15
+    years: {"2025": 291, "2026": 283}
+    note: "2025 新建的亚太一线，吸收了 PCS/VCS/LJL 的头部队伍"
+  "LCS":
+    canon: "LCS"
+    tier: 1
+    games: 1891
+    first_date: "2015-08-29"
+    last_date: "2026-09-18"
+    n_teams: 21
+    years: {"2015": 14, "2016": 10, "2017": 11, "2018": 8, "2019": 245, "2020": 264, "2021": 345, "2022": 306, "2023": 264, "2024": 192, "2026": 232}
+    note: "2015-2018 仅 8-14 场/年（北美区域决赛，队伍全是 NA LCS 队）；2019 起为主 code"
+  "LCSA":
+    canon: "NACL"
+    tier: 0
+    games: 1604
+    first_date: "2018-01-18"
+    last_date: "2022-09-01"
+    n_teams: 36
+    years: {"2018": 215, "2019": 219, "2020": 215, "2021": 415, "2022": 540}
+    note: "北美二级：LCS Academy(2018-2022)→NACL(2023-)；原始名重叠仅 5/24=0.20，但去掉 Academy/Challengers 后缀后 14/24=0.58"
+  "LDL":
+    canon: "LDL"
+    tier: 0
+    games: 7020
+    first_date: "2018-03-03"
+    last_date: "2024-06-05"
+    n_teams: 82
+    years: {"2018": 1125, "2019": 1267, "2020": 919, "2021": 1357, "2022": 939, "2023": 848, "2024": 565}
+    note: "中国二级，2018-2024（2025 起无数据）"
+  "LEC":
+    canon: "LEC"
+    tier: 1
+    games: 2281
+    first_date: "2015-08-29"
+    last_date: "2026-09-18"
+    n_teams: 26
+    years: {"2015": 11, "2016": 11, "2017": 11, "2018": 14, "2019": 238, "2020": 241, "2021": 247, "2022": 243, "2023": 288, "2024": 294, "2025": 306, "2026": 377}
+    note: "2015-2018 仅 11-14 场/年（欧洲区域决赛）；2019 起为主 code"
+  "LES":
+    canon: "LES"
+    tier: 0
+    games: 193
+    first_date: "2026-02-13"
+    last_date: "2026-09-06"
+    n_teams: 8
+    years: {"2026": 193}
+    note: "西班牙二级，2026 当前 code"
+  "LFL":
+    canon: "LFL"
+    tier: 0
+    games: 1883
+    first_date: "2019-01-22"
+    last_date: "2026-09-16"
+    n_teams: 39
+    years: {"2019": 152, "2020": 172, "2021": 240, "2022": 247, "2023": 242, "2024": 237, "2025": 318, "2026": 275}
+    note: "法国一级国内联赛"
+  "LFL2":
+    canon: "LFL2"
+    tier: 0
+    games: 920
+    first_date: "2021-08-23"
+    last_date: "2025-09-24"
+    n_teams: 35
+    years: {"2021": 25, "2022": 241, "2023": 249, "2024": 172, "2025": 233}
+    note: "法国二级 2020-2025；与 NL@2026 重叠 4/10=0.40，未达阈值，不合并"
+  "LGL":
+    canon: "HLL"
+    tier: 0
+    games: 8
+    first_date: "2019-04-06"
+    last_date: "2019-04-07"
+    n_teams: 4
+    years: {"2019": 8}
+    note: "希腊：LGL(2019, 8 场)与 GLL@2019 队伍 4/4=1.00，是同一批开赛周"
+  "LHE":
+    canon: "LHE"
+    tier: 0
+    games: 979
+    first_date: "2019-01-21"
+    last_date: "2023-03-31"
+    n_teams: 30
+    years: {"2019": 144, "2020": 244, "2021": 288, "2022": 244, "2023": 59}
+    note: "智利/秘鲁次级 2019-2023"
+  "LIT":
+    canon: "LIT"
+    tier: 0
+    games: 564
+    first_date: "2024-01-25"
+    last_date: "2026-09-18"
+    n_teams: 40
+    years: {"2024": 149, "2025": 139, "2026": 276}
+    note: "意大利二级，2024 起"
+  "LJL":
+    canon: "LJL"
+    tier: 0
+    games: 2307
+    first_date: "2016-01-17"
+    last_date: "2026-09-06"
+    n_teams: 53
+    years: {"2016": 100, "2017": 171, "2018": 172, "2019": 183, "2020": 165, "2021": 158, "2022": 215, "2023": 258, "2024": 148, "2025": 374, "2026": 363}
+    note: "日本一线；2016-2024 有世界赛席位，2025 起头部转入 LCP（见 tier_by_period）"
+  "LJLA":
+    canon: "LJLA"
+    tier: 0
+    games: 169
+    first_date: "2021-08-30"
+    last_date: "2023-08-11"
+    n_teams: 9
+    years: {"2021": 39, "2022": 38, "2023": 92}
+    note: "LJL Academy 2020-2023"
+  "LJLCS":
+    canon: "LJLCS"
+    tier: 0
+    games: 135
+    first_date: "2016-02-25"
+    last_date: "2018-08-09"
+    n_teams: 24
+    years: {"2016": 33, "2018": 102}
+    note: "LJL Challenger Series 2016-2018"
+  "LLA":
+    canon: "LLA"
+    tier: 1
+    games: 1153
+    first_date: "2019-01-19"
+    last_date: "2024-08-24"
+    n_teams: 17
+    years: {"2019": 217, "2020": 159, "2021": 184, "2022": 187, "2023": 193, "2024": 213}
+    note: "2019-2024 拉美一线，2025 并入 LTA S；与 LTA S 队伍重叠仅 2/7=0.29，不做别名合并"
+  "LLN":
+    canon: "LLN"
+    tier: 1
+    games: 445
+    first_date: "2016-08-15"
+    last_date: "2018-09-09"
+    n_teams: 20
+    years: {"2016": 41, "2017": 249, "2018": 155}
+    note: "2016-2018 拉美北部一线；与 LLA@2019 重叠 3/9=0.33，未达合并阈值"
+  "LMF":
+    canon: "LMF"
+    tier: 0
+    games: 1092
+    first_date: "2019-01-24"
+    last_date: "2023-03-31"
+    n_teams: 28
+    years: {"2019": 146, "2020": 220, "2021": 320, "2022": 320, "2023": 86}
+    note: "阿根廷 Liga Master Flow 2019-2023"
+  "LMS":
+    canon: "LMS"
+    tier: 1
+    games: 1329
+    first_date: "2015-01-08"
+    last_date: "2019-09-08"
+    n_teams: 34
+    years: {"2015": 182, "2016": 268, "2017": 296, "2018": 308, "2019": 275}
+    note: "2015-2019 台港澳一线，已停办"
+  "LPL":
+    canon: "LPL"
+    tier: 1
+    games: 7199
+    first_date: "2016-05-26"
+    last_date: "2026-09-13"
+    n_teams: 33
+    years: {"2016": 281, "2017": 345, "2018": 711, "2019": 651, "2020": 736, "2021": 738, "2022": 786, "2023": 755, "2024": 717, "2025": 805, "2026": 674}
+    note: "中国一线"
+  "LPLOL":
+    canon: "LPLOL"
+    tier: 0
+    games: 1355
+    first_date: "2019-01-28"
+    last_date: "2026-09-13"
+    n_teams: 67
+    years: {"2019": 191, "2020": 153, "2021": 164, "2022": 213, "2023": 160, "2024": 154, "2025": 158, "2026": 162}
+    note: "葡萄牙一级国内联赛"
+  "LRN":
+    canon: "LRN"
+    tier: 0
+    games: 534
+    first_date: "2023-05-28"
+    last_date: "2026-09-08"
+    n_teams: 30
+    years: {"2023": 116, "2024": 91, "2025": 151, "2026": 176}
+    note: "拉美北部区域联赛，2023 起"
+  "LRS":
+    canon: "LRS"
+    tier: 0
+    games: 544
+    first_date: "2023-06-01"
+    last_date: "2026-09-08"
+    n_teams: 24
+    years: {"2023": 119, "2024": 102, "2025": 136, "2026": 187}
+    note: "拉美南部区域联赛，2023 起"
+  "LSPL":
+    canon: "LDL"
+    tier: 0
+    games: 1027
+    first_date: "2016-01-18"
+    last_date: "2017-08-24"
+    n_teams: 33
+    years: {"2016": 344, "2017": 683}
+    note: "中国二级：LSPL(2016-2017)→LDL(2018-)；归一化共享 8 个俱乐部（0.42）"
+  "LTA":
+    canon: "LTA(2025-only)"
+    tier: 1
+    games: 40
+    first_date: "2025-02-15"
+    last_date: "2025-09-28"
+    n_teams: 11
+    years: {"2025": 40}
+    note: "2025 独立存在的 40 场 LTA 跨分区赛（11 队 = LTA N + LTA S 混合），不是任一分区的别名；canon 串沿用手册 §3.11.5 写法"
+  "LTA N":
+    canon: "LCS"
+    tier: 1
+    games: 214
+    first_date: "2025-01-25"
+    last_date: "2025-10-12"
+    n_teams: 12
+    years: {"2025": 214}
+    note: "2025 改名；LTA N@2025 vs LCS@2026 重叠 7/8=0.88，vs LCS@2024 6/8=0.75"
+  "LTA S":
+    canon: "CBLOL"
+    tier: 1
+    games: 222
+    first_date: "2025-01-25"
+    last_date: "2025-10-08"
+    n_teams: 13
+    years: {"2025": 222}
+    note: "2025 改名；LTA S@2025 vs CBLOL@2026 重叠 7/8=0.88（另吸收了 LLA 的 Isurus/Leviatan）"
+  "LVP SL":
+    canon: "LES"
+    tier: 0
+    games: 1225
+    first_date: "2021-01-18"
+    last_date: "2025-09-12"
+    n_teams: 31
+    years: {"2021": 227, "2022": 245, "2023": 247, "2024": 242, "2025": 264}
+    note: "西班牙：LVP SL(2021-2025)→LES(2026)；LVP SL@2025 vs LES@2026 重叠 6/8=0.75"
+  "MSC":
+    canon: "MSC"
+    tier: 2
+    games: 25
+    first_date: "2020-05-28"
+    last_date: "2020-05-31"
+    n_teams: 8
+    years: {"2020": 25}
+    note: "2020 Mid-Season Cup（LPL×LCK）"
+  "MSI":
+    canon: "MSI"
+    tier: 2
+    games: 765
+    first_date: "2015-05-07"
+    last_date: "2026-07-12"
+    n_teams: 67
+    years: {"2015": 28, "2016": 41, "2017": 78, "2018": 74, "2019": 78, "2021": 81, "2022": 80, "2023": 76, "2024": 78, "2025": 80, "2026": 71}
+    note: "季中邀请赛"
+  "NA CS":
+    canon: "NA CS"
+    tier: 0
+    games: 454
+    first_date: "2014-01-26"
+    last_date: "2017-07-28"
+    n_teams: 66
+    years: {"2014": 92, "2015": 135, "2016": 104, "2017": 123}
+    note: "北美 Challenger Series 2014-2017（二级）"
+  "NA LCS":
+    canon: "LCS"
+    tier: 1
+    games: 1736
+    first_date: "2014-01-17"
+    last_date: "2018-09-09"
+    n_teams: 46
+    years: {"2014": 336, "2015": 247, "2016": 383, "2017": 535, "2018": 235}
+    note: "2014-2018 北美一线；NA LCS@2018 vs LCS@2019 队伍重叠 10/10=1.00"
+  "NACL":
+    canon: "NACL"
+    tier: 0
+    games: 1905
+    first_date: "2023-01-21"
+    last_date: "2026-09-11"
+    n_teams: 92
+    years: {"2023": 861, "2024": 488, "2025": 275, "2026": 281}
+    note: "北美二级，2023 起"
+  "NASG":
+    canon: "NASG"
+    tier: 0
+    games: 156
+    first_date: "2017-12-01"
+    last_date: "2021-11-13"
+    n_teams: 4
+    years: {"2017": 19, "2018": 35, "2019": 33, "2020": 37, "2021": 32}
+    note: "北美 Scouting Grounds"
+  "NERD":
+    canon: "NERD"
+    tier: 0
+    games: 42
+    first_date: "2021-03-22"
+    last_date: "2021-03-27"
+    n_teams: 8
+    years: {"2021": 42}
+    note: "2021 北美业余"
+  "NEST":
+    canon: "NEST"
+    tier: 0
+    games: 50
+    first_date: "2020-11-09"
+    last_date: "2020-11-22"
+    n_teams: 12
+    years: {"2020": 50}
+    note: "2020 中国全国电子竞技大赛（参赛队全是 LPL 队，国内赛事）"
+  "NEXO":
+    canon: "NEXO"
+    tier: 0
+    games: 937
+    first_date: "2020-03-18"
+    last_date: "2025-06-26"
+    n_teams: 65
+    years: {"2020": 120, "2021": 128, "2022": 194, "2023": 181, "2024": 160, "2025": 154}
+    note: "西班牙次级 2020-2025"
+  "NL":
+    canon: "NL"
+    tier: 0
+    games: 137
+    first_date: "2026-04-11"
+    last_date: "2026-09-06"
+    n_teams: 10
+    years: {"2026": 137}
+    note: "2026 法国赛事（10 队）；与 LFL2@2025 重叠 4/10=0.40，疑似 LFL2 后继但证据不足，不合并"
+  "NLC":
+    canon: "NLC"
+    tier: 0
+    games: 1640
+    first_date: "2020-06-16"
+    last_date: "2026-09-16"
+    n_teams: 77
+    years: {"2020": 229, "2021": 343, "2022": 244, "2023": 157, "2024": 208, "2025": 249, "2026": 210}
+    note: "北欧/英国 Northern League of Legends Championship"
+  "NLC Aurora Open":
+    canon: "NLC Aurora Open"
+    tier: 0
+    games: 216
+    first_date: "2022-10-05"
+    last_date: "2024-11-12"
+    n_teams: 43
+    years: {"2022": 139, "2024": 77}
+    note: "NLC 公开赛/次级"
+  "OCS":
+    canon: "OCS"
+    tier: 0
+    games: 401
+    first_date: "2016-02-04"
+    last_date: "2020-08-20"
+    n_teams: 39
+    years: {"2016": 80, "2017": 67, "2018": 103, "2019": 83, "2020": 68}
+    note: "大洋洲 Challenger Series 2016-2020"
+  "OGN":
+    canon: "LCK"
+    tier: 1
+    games: 394
+    first_date: "2015-01-07"
+    last_date: "2015-09-05"
+    n_teams: 13
+    years: {"2015": 394}
+    note: "2015-01~09 的韩国一线（OGN Champions）；OGN@2015 vs LCK@2016 归一化重叠 7/13=0.54，LCK code 2015-09-11 才出现"
+  "OPL":
+    canon: "LCO"
+    tier: 1
+    games: 1169
+    first_date: "2015-05-28"
+    last_date: "2020-08-28"
+    n_teams: 29
+    years: {"2015": 52, "2016": 229, "2017": 247, "2018": 229, "2019": 195, "2020": 217}
+    note: "2015-2020 大洋洲一线；OPL@2020 vs LCO@2021 重叠 7/8=0.88"
+  "OTBLX":
+    canon: "OTBLX"
+    tier: 0
+    games: 390
+    first_date: "2020-02-16"
+    last_date: "2021-08-15"
+    n_teams: 52
+    years: {"2020": 114, "2021": 276}
+    note: "比荷卢业余 2020-2021"
+  "PCL":
+    canon: "PCL"
+    tier: 0
+    games: 447
+    first_date: "2023-08-15"
+    last_date: "2024-08-09"
+    n_teams: 38
+    years: {"2023": 107, "2024": 340}
+    note: "Pacific Challenger League（亚太青训）2023-2024"
+  "PCS":
+    canon: "PCS"
+    tier: 1
+    games: 1789
+    first_date: "2020-02-29"
+    last_date: "2026-09-06"
+    n_teams: 53
+    years: {"2020": 272, "2021": 266, "2022": 273, "2023": 293, "2024": 297, "2025": 302, "2026": 86}
+    note: "2020-2024 是太平洋一线；2025 起头部队伍转入 LCP，PCS 变成台港澳二级（见 tier_by_period）"
+  "PGC":
+    canon: "PGC"
+    tier: 0
+    games: 563
+    first_date: "2022-01-10"
+    last_date: "2022-08-03"
+    n_teams: 74
+    years: {"2022": 563}
+    note: "2022 北美业余大循环（74 队）"
+  "PGN":
+    canon: "LIT"
+    tier: 0
+    games: 952
+    first_date: "2018-05-27"
+    last_date: "2023-11-04"
+    n_teams: 36
+    years: {"2018": 95, "2019": 155, "2020": 166, "2021": 185, "2022": 150, "2023": 201}
+    note: "意大利：PG Nationals(2018-2023)→LIT(2024-)；PGN@2023 vs LIT@2024 重叠 7/11=0.64"
+  "PRM":
+    canon: "PRM"
+    tier: 0
+    games: 1955
+    first_date: "2020-01-21"
+    last_date: "2026-09-17"
+    n_teams: 35
+    years: {"2020": 278, "2021": 338, "2022": 233, "2023": 242, "2024": 241, "2025": 301, "2026": 322}
+    note: "德语区一级国内联赛 Prime League"
+  "PRMP":
+    canon: "PRMP"
+    tier: 0
+    games: 340
+    first_date: "2022-10-05"
+    last_date: "2025-08-30"
+    n_teams: 64
+    years: {"2022": 133, "2024": 134, "2025": 73}
+    note: "Prime League 次级/杯赛，与 PRM 并行"
+  "RCL":
+    canon: "RCL"
+    tier: 0
+    games: 551
+    first_date: "2020-05-31"
+    last_date: "2021-07-07"
+    n_teams: 77
+    years: {"2020": 200, "2021": 351}
+    note: "2020-2021 北美业余"
+  "RL":
+    canon: "RL"
+    tier: 0
+    games: 447
+    first_date: "2025-01-28"
+    last_date: "2026-09-10"
+    n_teams: 17
+    years: {"2025": 239, "2026": 208}
+    note: "波兰二级，2025 起"
+  "ROL":
+    canon: "ROL"
+    tier: 0
+    games: 465
+    first_date: "2025-02-11"
+    last_date: "2026-09-17"
+    n_teams: 13
+    years: {"2025": 208, "2026": 257}
+    note: "比荷卢二级，2025 起"
+  "Riot":
+    canon: "Riot"
+    tier: 2
+    games: 20
+    first_date: "2020-05-27"
+    last_date: "2020-05-30"
+    n_teams: 4
+    years: {"2020": 20}
+    note: "2020 的 20 场跨区赛（GAM/Machi/PSG Talon/Team Flash）"
+  "SL (LATAM)":
+    canon: "SL (LATAM)"
+    tier: 0
+    games: 275
+    first_date: "2021-08-26"
+    last_date: "2023-03-31"
+    n_teams: 21
+    years: {"2021": 20, "2022": 165, "2023": 90}
+    note: "秘鲁次级 2021-2023"
+  "SLO":
+    canon: "LES"
+    tier: 0
+    games: 636
+    first_date: "2018-01-31"
+    last_date: "2020-09-04"
+    n_teams: 20
+    years: {"2018": 192, "2019": 225, "2020": 219}
+    note: "西班牙：SLO(2018-2020)→LVP SL；SLO@2020 vs LVP SL@2021 重叠 10/11=0.91"
+  "TAL":
+    canon: "TAL"
+    tier: 0
+    games: 789
+    first_date: "2019-01-21"
+    last_date: "2022-08-17"
+    n_teams: 14
+    years: {"2019": 198, "2020": 182, "2021": 204, "2022": 205}
+    note: "土耳其学院联赛 2019-2022"
+  "TCL":
+    canon: "TCL"
+    tier: 0
+    games: 2646
+    first_date: "2015-01-24"
+    last_date: "2026-09-11"
+    n_teams: 54
+    years: {"2015": 168, "2016": 231, "2017": 286, "2018": 283, "2019": 219, "2020": 203, "2021": 224, "2022": 223, "2023": 180, "2024": 181, "2025": 240, "2026": 208}
+    note: "土耳其一线；2015-2021 有世界赛席位，2022 起并入 EMEA 体系（见 tier_by_period）"
+  "TCS":
+    canon: "TCS"
+    tier: 0
+    games: 97
+    first_date: "2018-01-30"
+    last_date: "2018-08-28"
+    n_teams: 9
+    years: {"2018": 97}
+    note: "土耳其次级 2018"
+  "TPL":
+    canon: "TPL"
+    tier: 0
+    games: 135
+    first_date: "2015-08-15"
+    last_date: "2017-07-27"
+    n_teams: 28
+    years: {"2015": 12, "2016": 39, "2017": 84}
+    note: "土耳其次级 2015-2017；与 TCS@2018 重叠 4/9=0.44，未达阈值"
+  "TSC":
+    canon: "TSC"
+    tier: 0
+    games: 107
+    first_date: "2024-01-05"
+    last_date: "2024-10-25"
+    n_teams: 25
+    years: {"2024": 107}
+    note: "2024 土耳其杯赛"
+  "UGP":
+    canon: "UGP"
+    tier: 0
+    games: 132
+    first_date: "2021-02-22"
+    last_date: "2021-08-21"
+    n_teams: 22
+    years: {"2021": 132}
+    note: "2021 北美业余"
+  "UKLC":
+    canon: "UKLC"
+    tier: 0
+    games: 430
+    first_date: "2019-02-13"
+    last_date: "2021-07-26"
+    n_teams: 20
+    years: {"2019": 142, "2020": 137, "2021": 151}
+    note: "英国/爱尔兰 2019-2021"
+  "UL":
+    canon: "RL"
+    tier: 0
+    games: 1267
+    first_date: "2018-10-22"
+    last_date: "2024-09-18"
+    n_teams: 48
+    years: {"2018": 105, "2019": 178, "2020": 168, "2021": 169, "2022": 244, "2023": 244, "2024": 159}
+    note: "波兰：Ultraliga(2018-2024)→RL(2025-)；UL@2024 vs RL@2025 重叠 6/12=0.50"
+  "UPL":
+    canon: "UPL"
+    tier: 0
+    games: 1042
+    first_date: "2020-02-05"
+    last_date: "2022-11-16"
+    n_teams: 110
+    years: {"2020": 340, "2021": 297, "2022": 405}
+    note: "北美大学/业余 2020-2022"
+  "USP":
+    canon: "USP"
+    tier: 0
+    games: 106
+    first_date: "2022-10-25"
+    last_date: "2024-10-26"
+    n_teams: 18
+    years: {"2022": 34, "2023": 34, "2024": 38}
+    note: "波兰次级 2022-2024"
+  "VCS":
+    canon: "VCS"
+    tier: 1
+    games: 2498
+    first_date: "2018-01-18"
+    last_date: "2026-09-13"
+    n_teams: 59
+    years: {"2018": 324, "2019": 337, "2020": 324, "2021": 307, "2022": 325, "2023": 362, "2024": 252, "2025": 141, "2026": 126}
+    note: "2018-2024 越南一线；2025 起头部队伍转入 LCP，VCS 变成越南二级（见 tier_by_period）"
+  "VL":
+    canon: "VL"
+    tier: 0
+    games: 275
+    first_date: "2021-08-18"
+    last_date: "2023-04-01"
+    n_teams: 21
+    years: {"2021": 17, "2022": 170, "2023": 88}
+    note: "厄瓜多尔/哥伦比亚次级 2021-2023"
+  "WLDs":
+    canon: "WLDs"
+    tier: 2
+    games: 1349
+    first_date: "2014-09-18"
+    last_date: "2026-09-18"
+    n_teams: 113
+    years: {"2014": 78, "2015": 73, "2016": 77, "2017": 119, "2018": 119, "2019": 120, "2020": 114, "2021": 121, "2022": 155, "2023": 137, "2024": 132, "2025": 96, "2026": 8}
+    note: "世界赛。注意原始 code 大小写是 WLDs，不是 WLDS"
+
+# ---------------------------------------------------------------------------
+# canonical 实体汇总
+# ---------------------------------------------------------------------------
+canonical:
+  "LDL":
+    tier: 0
+    games: 8047
+    first_date: "2016-01-18"
+    last_date: "2024-06-05"
+    raw_codes: ["LDL", "LSPL"]
+  "LPL":
+    tier: 1
+    games: 7199
+    first_date: "2016-05-26"
+    last_date: "2026-09-13"
+    raw_codes: ["LPL"]
+  "LCK":
+    tier: 1
+    games: 5871
+    first_date: "2015-01-07"
+    last_date: "2026-09-13"
+    raw_codes: ["LCK", "OGN"]
+  "LCS":
+    tier: 1
+    games: 3841
+    first_date: "2014-01-17"
+    last_date: "2026-09-18"
+    raw_codes: ["LCS", "LTA N", "NA LCS"]
+  "LEC":
+    tier: 1
+    games: 3835
+    first_date: "2014-01-14"
+    last_date: "2026-09-18"
+    raw_codes: ["EU LCS", "LEC"]
+  "NACL":
+    tier: 0
+    games: 3509
+    first_date: "2018-01-18"
+    last_date: "2026-09-11"
+    raw_codes: ["LCSA", "NACL"]
+  "LCKC":
+    tier: 0
+    games: 2664
+    first_date: "2021-01-18"
+    last_date: "2026-09-15"
+    raw_codes: ["LCKC"]
+  "TCL":
+    tier: 0
+    games: 2646
+    first_date: "2015-01-24"
+    last_date: "2026-09-11"
+    raw_codes: ["TCL"]
+  "VCS":
+    tier: 1
+    games: 2498
+    first_date: "2018-01-18"
+    last_date: "2026-09-13"
+    raw_codes: ["VCS"]
+  "CBLOL":
+    tier: 1
+    games: 2369
+    first_date: "2015-11-04"
+    last_date: "2026-09-13"
+    raw_codes: ["CBLOL", "LTA S"]
+  "EM":
+    tier: 0
+    games: 2341
+    first_date: "2018-04-09"
+    last_date: "2026-06-15"
+    raw_codes: ["EM", "EUM"]
+  "LJL":
+    tier: 0
+    games: 2307
+    first_date: "2016-01-17"
+    last_date: "2026-09-06"
+    raw_codes: ["LJL"]
+  "LES":
+    tier: 0
+    games: 2054
+    first_date: "2018-01-31"
+    last_date: "2026-09-06"
+    raw_codes: ["LES", "LVP SL", "SLO"]
+  "PRM":
+    tier: 0
+    games: 1955
+    first_date: "2020-01-21"
+    last_date: "2026-09-17"
+    raw_codes: ["PRM"]
+  "LFL":
+    tier: 0
+    games: 1883
+    first_date: "2019-01-22"
+    last_date: "2026-09-16"
+    raw_codes: ["LFL"]
+  "LAS":
+    tier: 0
+    games: 1871
+    first_date: "2020-11-28"
+    last_date: "2026-09-13"
+    raw_codes: ["LAS"]
+  "LCO":
+    tier: 1
+    games: 1857
+    first_date: "2015-05-28"
+    last_date: "2024-07-22"
+    raw_codes: ["LCO", "OPL"]
+  "PCS":
+    tier: 1
+    games: 1789
+    first_date: "2020-02-29"
+    last_date: "2026-09-06"
+    raw_codes: ["PCS"]
+  "RL":
+    tier: 0
+    games: 1714
+    first_date: "2018-10-22"
+    last_date: "2026-09-10"
+    raw_codes: ["RL", "UL"]
+  "NLC":
+    tier: 0
+    games: 1640
+    first_date: "2020-06-16"
+    last_date: "2026-09-16"
+    raw_codes: ["NLC"]
+  "HLL":
+    tier: 0
+    games: 1552
+    first_date: "2019-04-06"
+    last_date: "2026-09-12"
+    raw_codes: ["GLL", "HLL", "LGL"]
+  "LIT":
+    tier: 0
+    games: 1516
+    first_date: "2018-05-27"
+    last_date: "2026-09-18"
+    raw_codes: ["LIT", "PGN"]
+  "CK":
+    tier: 0
+    games: 1392
+    first_date: "2016-01-18"
+    last_date: "2020-08-31"
+    raw_codes: ["CK"]
+  "LPLOL":
+    tier: 0
+    games: 1355
+    first_date: "2019-01-28"
+    last_date: "2026-09-13"
+    raw_codes: ["LPLOL"]
+  "WLDs":
+    tier: 2
+    games: 1349
+    first_date: "2014-09-18"
+    last_date: "2026-09-18"
+    raw_codes: ["WLDs"]
+  "LMS":
+    tier: 1
+    games: 1329
+    first_date: "2015-01-08"
+    last_date: "2019-09-08"
+    raw_codes: ["LMS"]
+  "ROL":
+    tier: 0
+    games: 1298
+    first_date: "2022-01-17"
+    last_date: "2026-09-17"
+    raw_codes: ["ESLOL", "ROL"]
+  "EBL":
+    tier: 0
+    games: 1277
+    first_date: "2019-01-28"
+    last_date: "2026-09-10"
+    raw_codes: ["EBL"]
+  "HM":
+    tier: 0
+    games: 1259
+    first_date: "2019-02-17"
+    last_date: "2026-09-17"
+    raw_codes: ["HM"]
+  "LLA":
+    tier: 1
+    games: 1153
+    first_date: "2019-01-19"
+    last_date: "2024-08-24"
+    raw_codes: ["LLA"]
+  "LMF":
+    tier: 0
+    games: 1092
+    first_date: "2019-01-24"
+    last_date: "2023-03-31"
+    raw_codes: ["LMF"]
+  "UPL":
+    tier: 0
+    games: 1042
+    first_date: "2020-02-05"
+    last_date: "2022-11-16"
+    raw_codes: ["UPL"]
+  "HC":
+    tier: 0
+    games: 1013
+    first_date: "2020-07-09"
+    last_date: "2026-09-18"
+    raw_codes: ["HC"]
+  "LHE":
+    tier: 0
+    games: 979
+    first_date: "2019-01-21"
+    last_date: "2023-03-31"
+    raw_codes: ["LHE"]
+  "AL":
+    tier: 0
+    games: 968
+    first_date: "2023-02-01"
+    last_date: "2026-09-17"
+    raw_codes: ["AL"]
+  "CBLOLA":
+    tier: 0
+    games: 961
+    first_date: "2021-01-19"
+    last_date: "2024-08-25"
+    raw_codes: ["CBLOLA"]
+  "NEXO":
+    tier: 0
+    games: 937
+    first_date: "2020-03-18"
+    last_date: "2025-06-26"
+    raw_codes: ["NEXO"]
+  "LFL2":
+    tier: 0
+    games: 920
+    first_date: "2021-08-23"
+    last_date: "2025-09-24"
+    raw_codes: ["LFL2"]
+  "LCL":
+    tier: 1
+    games: 897
+    first_date: "2016-01-16"
+    last_date: "2022-02-20"
+    raw_codes: ["LCL"]
+  "DDH":
+    tier: 0
+    games: 828
+    first_date: "2019-01-25"
+    last_date: "2023-03-31"
+    raw_codes: ["DDH"]
+  "TAL":
+    tier: 0
+    games: 789
+    first_date: "2019-01-21"
+    last_date: "2022-08-17"
+    raw_codes: ["TAL"]
+  "MSI":
+    tier: 2
+    games: 765
+    first_date: "2015-05-07"
+    last_date: "2026-07-12"
+    raw_codes: ["MSI"]
+  "DCup":
+    tier: 0
+    games: 661
+    first_date: "2016-06-29"
+    last_date: "2025-12-29"
+    raw_codes: ["DCup"]
+  "CLS":
+    tier: 1
+    games: 580
+    first_date: "2016-02-04"
+    last_date: "2018-09-09"
+    raw_codes: ["CLS"]
+  "LCP":
+    tier: 1
+    games: 574
+    first_date: "2025-01-17"
+    last_date: "2026-08-30"
+    raw_codes: ["LCP"]
+  "PGC":
+    tier: 0
+    games: 563
+    first_date: "2022-01-10"
+    last_date: "2022-08-03"
+    raw_codes: ["PGC"]
+  "CD":
+    tier: 0
+    games: 559
+    first_date: "2025-02-03"
+    last_date: "2026-09-14"
+    raw_codes: ["CD"]
+  "RCL":
+    tier: 0
+    games: 551
+    first_date: "2020-05-31"
+    last_date: "2021-07-07"
+    raw_codes: ["RCL"]
+  "LRS":
+    tier: 0
+    games: 544
+    first_date: "2023-06-01"
+    last_date: "2026-09-08"
+    raw_codes: ["LRS"]
+  "LRN":
+    tier: 0
+    games: 534
+    first_date: "2023-05-28"
+    last_date: "2026-09-08"
+    raw_codes: ["LRN"]
+  "EU CS":
+    tier: 0
+    games: 506
+    first_date: "2014-02-14"
+    last_date: "2017-08-06"
+    raw_codes: ["EU CS"]
+  "NA CS":
+    tier: 0
+    games: 454
+    first_date: "2014-01-26"
+    last_date: "2017-07-28"
+    raw_codes: ["NA CS"]
+  "PCL":
+    tier: 0
+    games: 447
+    first_date: "2023-08-15"
+    last_date: "2024-08-09"
+    raw_codes: ["PCL"]
+  "LLN":
+    tier: 1
+    games: 445
+    first_date: "2016-08-15"
+    last_date: "2018-09-09"
+    raw_codes: ["LLN"]
+  "UKLC":
+    tier: 0
+    games: 430
+    first_date: "2019-02-13"
+    last_date: "2021-07-26"
+    raw_codes: ["UKLC"]
+  "BRCC":
+    tier: 0
+    games: 424
+    first_date: "2017-01-23"
+    last_date: "2020-08-15"
+    raw_codes: ["BRCC"]
+  "KeSPA Cup":
+    tier: 0
+    games: 414
+    first_date: "2015-11-06"
+    last_date: "2026-08-18"
+    raw_codes: ["KeSPA", "KeSPA Cup"]
+  "OCS":
+    tier: 0
+    games: 401
+    first_date: "2016-02-04"
+    last_date: "2020-08-20"
+    raw_codes: ["OCS"]
+  "OTBLX":
+    tier: 0
+    games: 390
+    first_date: "2020-02-16"
+    last_date: "2021-08-15"
+    raw_codes: ["OTBLX"]
+  "BIG":
+    tier: 0
+    games: 343
+    first_date: "2019-01-22"
+    last_date: "2021-02-08"
+    raw_codes: ["BIG"]
+  "PRMP":
+    tier: 0
+    games: 340
+    first_date: "2022-10-05"
+    last_date: "2025-08-30"
+    raw_codes: ["PRMP"]
+  "HW":
+    tier: 0
+    games: 337
+    first_date: "2021-11-11"
+    last_date: "2026-03-07"
+    raw_codes: ["HW"]
+  "EWC":
+    tier: 2
+    games: 284
+    first_date: "2024-07-04"
+    last_date: "2026-07-19"
+    raw_codes: ["EWC"]
+  "SL (LATAM)":
+    tier: 0
+    games: 275
+    first_date: "2021-08-26"
+    last_date: "2023-03-31"
+    raw_codes: ["SL (LATAM)"]
+  "VL":
+    tier: 0
+    games: 275
+    first_date: "2021-08-18"
+    last_date: "2023-04-01"
+    raw_codes: ["VL"]
+  "GL":
+    tier: 0
+    games: 271
+    first_date: "2021-08-23"
+    last_date: "2023-03-28"
+    raw_codes: ["GL"]
+  "IC":
+    tier: 0
+    games: 244
+    first_date: "2022-10-17"
+    last_date: "2025-11-22"
+    raw_codes: ["IC"]
+  "BM":
+    tier: 0
+    games: 243
+    first_date: "2019-07-07"
+    last_date: "2021-08-11"
+    raw_codes: ["BM"]
+  "Asia Master":
+    tier: 0
+    games: 240
+    first_date: "2025-06-22"
+    last_date: "2026-06-21"
+    raw_codes: ["Asia Master"]
+  "CT":
+    tier: 0
+    games: 240
+    first_date: "2019-11-29"
+    last_date: "2025-07-16"
+    raw_codes: ["CT"]
+  "EPL":
+    tier: 0
+    games: 236
+    first_date: "2023-06-08"
+    last_date: "2024-09-23"
+    raw_codes: ["EPL"]
+  "CDF":
+    tier: 0
+    games: 217
+    first_date: "2022-10-17"
+    last_date: "2024-10-23"
+    raw_codes: ["CDF"]
+  "NLC Aurora Open":
+    tier: 0
+    games: 216
+    first_date: "2022-10-05"
+    last_date: "2024-11-12"
+    raw_codes: ["NLC Aurora Open"]
+  "CU":
+    tier: 0
+    games: 209
+    first_date: "2020-07-27"
+    last_date: "2021-06-09"
+    raw_codes: ["CU"]
+  "DL":
+    tier: 0
+    games: 198
+    first_date: "2020-01-21"
+    last_date: "2021-10-17"
+    raw_codes: ["DL"]
+  "BL":
+    tier: 0
+    games: 196
+    first_date: "2020-01-20"
+    last_date: "2021-10-09"
+    raw_codes: ["BL"]
+  "EL":
+    tier: 0
+    games: 176
+    first_date: "2022-01-24"
+    last_date: "2023-03-25"
+    raw_codes: ["EL"]
+  "LJLA":
+    tier: 0
+    games: 169
+    first_date: "2021-08-30"
+    last_date: "2023-08-11"
+    raw_codes: ["LJLA"]
+  "NASG":
+    tier: 0
+    games: 156
+    first_date: "2017-12-01"
+    last_date: "2021-11-13"
+    raw_codes: ["NASG"]
+  "ASCI":
+    tier: 0
+    games: 150
+    first_date: "2022-09-12"
+    last_date: "2023-09-15"
+    raw_codes: ["ASCI"]
+  "IEM":
+    tier: 2
+    games: 139
+    first_date: "2015-03-13"
+    last_date: "2017-02-26"
+    raw_codes: ["IEM"]
+  "GPL":
+    tier: 1
+    games: 138
+    first_date: "2016-04-07"
+    last_date: "2018-04-01"
+    raw_codes: ["GPL"]
+  "NL":
+    tier: 0
+    games: 137
+    first_date: "2026-04-11"
+    last_date: "2026-09-06"
+    raw_codes: ["NL"]
+  "LJLCS":
+    tier: 0
+    games: 135
+    first_date: "2016-02-25"
+    last_date: "2018-08-09"
+    raw_codes: ["LJLCS"]
+  "TPL":
+    tier: 0
+    games: 135
+    first_date: "2015-08-15"
+    last_date: "2017-07-27"
+    raw_codes: ["TPL"]
+  "UGP":
+    tier: 0
+    games: 132
+    first_date: "2021-02-22"
+    last_date: "2021-08-21"
+    raw_codes: ["UGP"]
+  "TSC":
+    tier: 0
+    games: 107
+    first_date: "2024-01-05"
+    last_date: "2024-10-25"
+    raw_codes: ["TSC"]
+  "CISC":
+    tier: 0
+    games: 106
+    first_date: "2017-01-31"
+    last_date: "2018-08-22"
+    raw_codes: ["CISC"]
+  "USP":
+    tier: 0
+    games: 106
+    first_date: "2022-10-25"
+    last_date: "2024-10-26"
+    raw_codes: ["USP"]
+  "TCS":
+    tier: 0
+    games: 97
+    first_date: "2018-01-30"
+    last_date: "2018-08-28"
+    raw_codes: ["TCS"]
+  "EGL":
+    tier: 0
+    games: 92
+    first_date: "2021-07-07"
+    last_date: "2021-07-28"
+    raw_codes: ["EGL"]
+  "GLLPA":
+    tier: 0
+    games: 85
+    first_date: "2022-10-11"
+    last_date: "2024-10-24"
+    raw_codes: ["GLLPA"]
+  "FST":
+    tier: 2
+    games: 80
+    first_date: "2025-03-10"
+    last_date: "2026-03-22"
+    raw_codes: ["FST"]
+  "IGNIS":
+    tier: 0
+    games: 55
+    first_date: "2024-05-07"
+    last_date: "2024-11-16"
+    raw_codes: ["IGNIS"]
+  "AC":
+    tier: 0
+    games: 54
+    first_date: "2024-09-14"
+    last_date: "2026-03-08"
+    raw_codes: ["AC"]
+  "GSG":
+    tier: 0
+    games: 53
+    first_date: "2021-03-08"
+    last_date: "2021-03-18"
+    raw_codes: ["GSG"]
+  "NEST":
+    tier: 0
+    games: 50
+    first_date: "2020-11-09"
+    last_date: "2020-11-22"
+    raw_codes: ["NEST"]
+  "EBLPA":
+    tier: 0
+    games: 44
+    first_date: "2022-10-18"
+    last_date: "2024-10-25"
+    raw_codes: ["EBLPA"]
+  "ASI":
+    tier: 2
+    games: 42
+    first_date: "2025-10-06"
+    last_date: "2025-10-12"
+    raw_codes: ["ASI"]
+  "NERD":
+    tier: 0
+    games: 42
+    first_date: "2021-03-22"
+    last_date: "2021-03-27"
+    raw_codes: ["NERD"]
+  "CCWS":
+    tier: 0
+    games: 40
+    first_date: "2026-01-20"
+    last_date: "2026-02-05"
+    raw_codes: ["CCWS"]
+  "IWCI":
+    tier: 2
+    games: 40
+    first_date: "2016-04-16"
+    last_date: "2016-04-23"
+    raw_codes: ["IWCI"]
+  "LTA(2025-only)":
+    tier: 1
+    games: 40
+    first_date: "2025-02-15"
+    last_date: "2025-09-28"
+    raw_codes: ["LTA"]
+  "AOL":
+    tier: 0
+    games: 37
+    first_date: "2021-03-18"
+    last_date: "2021-03-26"
+    raw_codes: ["AOL"]
+  "MSC":
+    tier: 2
+    games: 25
+    first_date: "2020-05-28"
+    last_date: "2020-05-31"
+    raw_codes: ["MSC"]
+  "Riot":
+    tier: 2
+    games: 20
+    first_date: "2020-05-27"
+    last_date: "2020-05-30"
+    raw_codes: ["Riot"]
+
+# 便捷集合（下游请用这两个，别再手写字符串字面量）
+tier1_canon: ["CBLOL", "CLS", "GPL", "LCK", "LCL", "LCO", "LCP", "LCS", "LEC", "LLA", "LLN", "LMS", "LPL", "LTA(2025-only)", "PCS", "VCS"]
+intl_canon:  ["ASI", "EWC", "FST", "IEM", "IWCI", "MSC", "MSI", "Riot", "WLDs"]
+
+tier_totals:
+  "2": {n_canonical: 9, games: 2744}
+  "1": {n_canonical: 16, games: 34415}
+  "0": {n_canonical: 81, games: 64925}
+
+tier1_games_by_year:
+  "2014": 661
+  "2015": 1185
+  "2016": 2611
+  "2017": 3154
+  "2018": 3315
+  "2019": 2992
+  "2020": 3017
+  "2021": 3128
+  "2022": 3058
+  "2023": 3024
+  "2024": 2864
+  "2025": 2876
+  "2026": 2530
+
+# ---------------------------------------------------------------------------
+# tier 随时间变化的实体（**默认不生效**，只作记录；要用请在 experiments/ 下显式开）
+# ---------------------------------------------------------------------------
+tier_by_period:
+  - canon: "PCS"
+    from: "2020-01-01"
+    to: "2024-12-31"
+    tier: 1
+    why: "2020-2024 每年 2-3 队进世界赛"
+  - canon: "PCS"
+    from: "2025-01-01"
+    to: null
+    tier: 0
+    why: "2025/2026 零队进世界赛，2025 阵容变成 CFO Academy/PSG Talon Academy 等二队；但 eval/tier1_leagues.yaml 已冻结且把 PCS 列为 tier-1，默认 tier 仍取 1"
+  - canon: "VCS"
+    from: "2018-01-01"
+    to: "2024-12-31"
+    tier: 1
+    why: "2018/2019/2022/2023/2024 有队进世界赛（2020/2021 疫情缺席）"
+  - canon: "VCS"
+    from: "2025-01-01"
+    to: null
+    tier: 0
+    why: "2025/2026 零队进世界赛，GAM/Team Secret Whales 已转入 LCP；同上，默认 tier 仍取 1"
+  - canon: "LJL"
+    from: "2016-01-01"
+    to: "2024-12-31"
+    tier: 1
+    why: "2016-2024 每年 1-2 队进世界赛；2025 起头部转入 LCP，默认 tier 取 0"
+  - canon: "TCL"
+    from: "2015-01-01"
+    to: "2021-12-31"
+    tier: 1
+    why: "2015-2021 每年 1-2 队进世界赛；2022 起并入 EMEA 体系，默认 tier 取 0"
+  - canon: "LCO"
+    from: "2016-01-01"
+    to: "2022-12-31"
+    tier: 1
+    why: "OPL 2016-2020 + LCO 2021-2022 有世界赛席位；2023-2024 无，默认 tier 取 1"
+
+# ---------------------------------------------------------------------------
+# 「照字面用冻结文件的 raw code 过滤」 vs 「用本表 canonical tier∈{1,2} 过滤」
+# 的逐 code 差异。holdout_games 只是描述性计数，不用于任何调参或模型选择。
+# ---------------------------------------------------------------------------
+eval_scope_delta_vs_frozen:
+  frozen_file: eval/tier1_leagues.yaml
+  frozen_literal_codes: ["CBLOL", "EWC", "FST", "IC", "LCK", "LCP", "LCS", "LEC", "LPL", "LTA", "LTA N", "LTA S", "MSI", "PCS", "VCS", "WLDS"]
+  holdout_start: "2026-06-01"
+  in_frozen_but_tier0_here:   # 冻结文件收了、本表判 tier 0
+    - {code: "IC", games: 244, holdout_games: 0, reason: "**Iberian Cup**（西班牙 LVP SL + 葡萄牙 LPLOL 的跨国杯赛）。实测 2024/2025 参赛队全是西葡二级队，不是国际赛；eval/tier1_leagues.yaml 把它列进 international 是"}
+  in_scope_here_but_not_in_frozen:   # 本表判 tier 1/2、冻结文件字面没有
+    - {code: "ASI", tier: 2, games: 42, holdout_games: 0, last_date: "2025-10-12"}
+    - {code: "CLS", tier: 1, games: 580, holdout_games: 0, last_date: "2018-09-09"}
+    - {code: "EU LCS", tier: 1, games: 1554, holdout_games: 0, last_date: "2018-09-09"}
+    - {code: "GPL", tier: 1, games: 138, holdout_games: 0, last_date: "2018-04-01"}
+    - {code: "IEM", tier: 2, games: 139, holdout_games: 0, last_date: "2017-02-26"}
+    - {code: "IWCI", tier: 2, games: 40, holdout_games: 0, last_date: "2016-04-23"}
+    - {code: "LCL", tier: 1, games: 897, holdout_games: 0, last_date: "2022-02-20"}
+    - {code: "LCO", tier: 1, games: 688, holdout_games: 0, last_date: "2024-07-22"}
+    - {code: "LLA", tier: 1, games: 1153, holdout_games: 0, last_date: "2024-08-24"}
+    - {code: "LLN", tier: 1, games: 445, holdout_games: 0, last_date: "2018-09-09"}
+    - {code: "LMS", tier: 1, games: 1329, holdout_games: 0, last_date: "2019-09-08"}
+    - {code: "MSC", tier: 2, games: 25, holdout_games: 0, last_date: "2020-05-31"}
+    - {code: "NA LCS", tier: 1, games: 1736, holdout_games: 0, last_date: "2018-09-09"}
+    - {code: "OGN", tier: 1, games: 394, holdout_games: 0, last_date: "2015-09-05"}
+    - {code: "OPL", tier: 1, games: 1169, holdout_games: 0, last_date: "2020-08-28"}
+    - {code: "Riot", tier: 2, games: 20, holdout_games: 0, last_date: "2020-05-30"}
+    - {code: "WLDs", tier: 2, games: 1349, holdout_games: 8, last_date: "2026-09-18"}
+  holdout_games_added: 8
+  holdout_games_dropped: 0
+
+# ---------------------------------------------------------------------------
+# 与已冻结的 eval/tier1_leagues.yaml 的差异（只报告，不修改那个文件）
+# ---------------------------------------------------------------------------
+frozen_eval_issues:
+  - item: "international 含 'WLDS'"
+    problem: "原始 code 实际是 'WLDs'（小写 s），全量 1,349 场。**这个 bug 已经生效**：eval/holdout_gameids_20260918.txt 是 1,071 场，而 date>=2026-06-01 且 tier∈{1,2} 的实测是 1,079 场，差的正好是 2026 世界赛那 8 场（8 场 gameid 无一在 holdout 名单里）。冻结名单不能改，但下游必须知道 holdout 里没有世界赛样本"
+  - item: "international 含 'IC'"
+    problem: "IC = Iberian Cup（西葡二级队的跨国杯赛，2022-2025 共 244 场），不是国际赛。本表判为 tier 0"
+  - item: "tier1_2026 含 'PCS' / 'VCS'"
+    problem: "实测 2025 起两者都零队进世界赛、阵容变成二队；2026 分别 86 / 126 场。因该文件已冻结，本表仍给 tier 1，仅在 tier_by_period 记录"
+  - item: "缺历史一线赛区"
+    problem: "NA LCS / EU LCS / OGN 由别名归一解决；LMS / OPL+LCO / LCL / LLA / LLN / CLS / GPL 该文件完全没提，本表补为 tier 1（全部已停办，对 holdout 零影响）"
+
+unregistered_codes: []   # 本次扫描：全部 raw code 均已登记

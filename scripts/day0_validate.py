@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 
 RAW = "data/raw"
 MANIFEST = "data/manifest.jsonl"
@@ -59,7 +59,8 @@ def validate(path: str, year: int, prev: dict, today: date) -> tuple[dict, list[
     warns: list[str] = []
 
     # 闸 1：不是 Drive 配额错误页（HTTP 200 + HTML，csv 读它得到 0 行且不报错）
-    head = open(path, "rb").read(4096)
+    with open(path, "rb") as fh:
+        head = fh.read(4096)
     if b"Quota exceeded" in head or head.lstrip()[:1] == b"<":
         raise AssertionError("闸1 失败：拿到的是 HTML（Drive 配额错误页），不是 CSV")
 
@@ -84,8 +85,7 @@ def validate(path: str, year: int, prev: dict, today: date) -> tuple[dict, list[
             n_rows += 1
             per_game[row["gameid"]] += 1
             d = row.get("date") or ""
-            if d > max_date:
-                max_date = d
+            max_date = max(max_date, d)
     n_games = len(per_game)
     if n_games == 0:
         raise AssertionError("闸4 失败：解析出 0 场比赛")
@@ -124,13 +124,13 @@ def validate(path: str, year: int, prev: dict, today: date) -> tuple[dict, list[
         "max_date": max_date[:10],
         "bytes": size,
         "sha256": sha256_of(path),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.now(UTC).isoformat(),
     }
     return rec, warns
 
 
 def main() -> int:
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     prev = load_prev(MANIFEST)
     files = sorted(
         f for f in os.listdir(RAW) if f.endswith("_LoL_esports_match_data_from_OraclesElixir.csv")
@@ -160,17 +160,19 @@ def main() -> int:
     seen = {(r["year"], r["sha256"]) for r in prev.values()}
     if os.path.exists(MANIFEST):
         seen = set()
-        for line in open(MANIFEST):
-            line = line.strip()
-            if line:
-                r = json.loads(line)
-                seen.add((r["year"], r["sha256"]))
+        with open(MANIFEST) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    r = json.loads(line)
+                    seen.add((r["year"], r["sha256"]))
     new = [r for r in recs if (r["year"], r["sha256"]) not in seen]
     if new:
         tmp = MANIFEST + ".tmp"
         with open(tmp, "w") as mf:
             if os.path.exists(MANIFEST):
-                mf.write(open(MANIFEST).read())
+                with open(MANIFEST) as old:
+                    mf.write(old.read())
             for r in new:
                 mf.write(json.dumps(r, ensure_ascii=False) + "\n")
         os.replace(tmp, MANIFEST)
