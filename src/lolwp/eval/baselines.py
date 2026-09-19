@@ -19,6 +19,13 @@ LADDER: dict[str, list[str]] = {
     "L1b": ["side_prior"],
     "L2": ["side_prior", "team_elo_diff"],
     "L3": ["side_prior", "team_elo_diff", "player_elo_diff"],
+    # L4 = L3 + 英雄版本强度。手册 §9.7 称它是 draft 层唯一稳定有增量的特征。
+    "L4": ["side_prior", "team_elo_diff", "player_elo_diff", "champ_meta_diff"],
+    # L5 = L4 + 熟练度。手册预期它低于 MDE；裁决由 §6.7 的门禁给出，不由预期给出。
+    "L5": ["side_prior", "team_elo_diff", "player_elo_diff", "champ_meta_diff",
+           "mastery_diff"],
+    # L6 = L3 + 英雄 one-hot 差分。反面教材：手册实测它比 L3 更差。
+    "L6": ["side_prior", "team_elo_diff", "player_elo_diff"],
 }
 
 
