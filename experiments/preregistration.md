@@ -1,7 +1,7 @@
 # 预注册 v1
 
 > 冻结日期：2026-09-18
-> 冻结时的 git sha：`<COMMIT_SHA>`（本文件提交后回填）
+> 冻结时的 git sha：`599bfd6fd7baf2fbca9f08321836fd640765ab46`（本文件提交后回填）
 > **在本文件被 commit 之前，不得对 holdout 做任何评估。**
 > 依据：docs/PLAN.md §2.5
 
