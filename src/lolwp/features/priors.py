@@ -64,7 +64,8 @@ def run_state_machine(
     *,
     elo: EloConfig | None = None,
     side: SidePriorConfig | None = None,
-) -> pd.DataFrame:
+    return_state: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """单遍产出 as-of 特征。df 必须按 kickoff_utc 升序、一场一行。
 
     返回与 df 同索引的特征表，**每一列都只用了本场开赛前的信息**。
@@ -140,4 +141,72 @@ def run_state_machine(
             player.commit(p, player.get(p, now) + elo.k * ((1 - y) - (1 - e_pl)), now)
             player_seen[p] = player_seen.get(p, 0) + 1
 
-    return pd.DataFrame(out, index=df.index)
+    feats = pd.DataFrame(out, index=df.index)
+    if not return_state:
+        return feats
+    # 最终状态快照：推理时用它 + 下面 features_from_state() 的同一套公式，
+    # 保证 training/serving 不会 skew（PLAN.md §7.4）。
+    state = {
+        "team_elo": dict(team.r),
+        "team_last": {k: str(v) for k, v in team.last_seen.items()},
+        "player_elo": dict(player.r),
+        "player_last": {k: str(v) for k, v in player.last_seen.items()},
+        "team_games": dict(team_seen),
+        "player_games": dict(player_seen),
+        "side_global": {"wins": g_wins, "n": g_n},
+        "side_league": {k: [lg_wins[k], lg_n[k]] for k in lg_n},
+        "elo_cfg": {"k": elo.k, "init": elo.init, "scale": elo.scale,
+                     "season_decay": elo.season_decay, "season_gap_days": elo.season_gap_days},
+        "side_cfg": {"k": side.k, "global_init": side.global_init},
+        "as_of": str(df.kickoff_utc.max()),
+        "n_games": len(df),
+    }
+    return feats, state
+
+
+def features_from_state(
+    state: dict,
+    *,
+    league_canon: str,
+    blue_team_id: str,
+    red_team_id: str,
+    blue_player_ids: list[str],
+    red_player_ids: list[str],
+) -> dict[str, float]:
+    """从状态快照算单场特征。**必须与 run_state_machine 的公式逐字一致。**
+
+    training/serving skew 是这类系统最常见的静默故障：两条路径各写一遍公式，
+    差一点点，线上指标比离线差却查不出原因。tests/test_serving_skew.py 用
+    golden test 锁死两者一致。
+    """
+    ecfg = state["elo_cfg"]
+    scfg = state["side_cfg"]
+    init = ecfg["init"]
+
+    gw, gn = state["side_global"]["wins"], state["side_global"]["n"]
+    gl = (gw + scfg["k"] * scfg["global_init"]) / (gn + scfg["k"])
+    lw, ln = state["side_league"].get(league_canon, [0.0, 0.0])
+    side_prior = (lw + scfg["k"] * gl) / (ln + scfg["k"])
+
+    te = state["team_elo"]
+    rb = te.get(str(blue_team_id), init)
+    rr = te.get(str(red_team_id), init)
+
+    pe = state["player_elo"]
+    bp = [pe.get(str(p), init) for p in blue_player_ids if p]
+    rp = [pe.get(str(p), init) for p in red_player_ids if p]
+    pb = float(np.mean(bp)) if bp else init
+    pr = float(np.mean(rp)) if rp else init
+
+    tg, pg = state["team_games"], state["player_games"]
+    return {
+        "side_prior": side_prior,
+        "team_elo_diff": rb - rr,
+        "player_elo_diff": pb - pr,
+        "blue_team_elo": rb,
+        "red_team_elo": rr,
+        "team_games_min": float(min(tg.get(str(blue_team_id), 0), tg.get(str(red_team_id), 0))),
+        "player_games_min": float(min(
+            [pg.get(str(p), 0) for p in list(blue_player_ids) + list(red_player_ids) if p] or [0]
+        )),
+    }

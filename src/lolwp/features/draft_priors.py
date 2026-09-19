@@ -65,7 +65,8 @@ def run_draft_state_machine(
     *,
     tier_col: str = "league_tier",
     min_tier_for_winrate: int = 1,
-) -> pd.DataFrame:
+    return_state: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """单遍产出 champ_meta_diff / mastery_diff 等 as-of 特征。
 
     df 必须按 kickoff_utc 升序、一场一行，且包含 blue/red_champ_keys 与 player_ids。
@@ -157,4 +158,109 @@ def run_draft_state_machine(
                     mastery.update((str(pid), ck), yy, now)
                     seen_pc.add((str(pid), ck))
 
-    return pd.DataFrame(out, index=df.index)
+    feats = pd.DataFrame(out, index=df.index)
+    if not return_state:
+        return feats
+    now = df.kickoff_utc.iloc[-1]
+    # 只导出衰减到 as_of 时刻的值，推理时再按实际时间继续衰减
+    champ = {}
+    for key in cs_t1.n:
+        if key[0] == "__POS__":
+            continue
+        w, n_ = cs_t1.read(key, now)
+        if n_ > 1e-4:
+            champ[f"{key[0]}|{key[1]}"] = [w, n_]
+    pos_base = {}
+    for pos in ROLES:
+        w, n_ = cs_all.read(("__POS__", pos), now)
+        pos_base[pos] = _logit(w / n_) if n_ > 0 else 0.0
+    mast = {}
+    for key in mastery.n:
+        _, g = mastery.read(key, now)
+        if g > 1e-3:
+            mast[f"{key[0]}|{key[1]}"] = g
+    state = {
+        "champ_t1": champ,
+        "pos_base_logit": pos_base,
+        "mastery": mast,
+        "k1": 476.0,
+        "hl_champ_days": HL_CHAMP_DAYS,
+        "hl_mastery_days": HL_MASTERY_DAYS,
+        "as_of": str(now),
+        "n_seen_pc": len(seen_pc),
+    }
+    return feats, state
+
+
+def draft_features_from_state(
+    state: dict,
+    *,
+    blue_champ_keys: list[int],
+    red_champ_keys: list[int],
+    blue_player_ids: list[str] | None = None,
+    red_player_ids: list[str] | None = None,
+    now: pd.Timestamp | None = None,
+) -> dict[str, float]:
+    """从状态快照算单场 draft 特征。**必须与 run_draft_state_machine 的公式一致。**
+
+    now 给定时按实际时间继续衰减；不给则视作快照时刻（最常见的推理场景：
+    预测的就是"现在"这场比赛，距快照通常只有几天，衰减可忽略但仍然算上）。
+    """
+    k1 = state["k1"]
+    base = state["pos_base_logit"]
+    champ = state["champ_t1"]
+    mast = state.get("mastery", {})
+    as_of = pd.Timestamp(state["as_of"])
+    f = 1.0
+    if now is not None:
+        dt = (pd.Timestamp(now) - as_of).total_seconds() / 86400.0
+        f = 0.5 ** (max(dt, 0.0) / state["hl_champ_days"])
+    fm = 1.0
+    if now is not None:
+        dt = (pd.Timestamp(now) - as_of).total_seconds() / 86400.0
+        fm = 0.5 ** (max(dt, 0.0) / state["hl_mastery_days"])
+
+    def side_logit(keys: list[int]) -> tuple[float, int]:
+        tot, cov = 0.0, 0
+        for pos, c in zip(ROLES, keys):
+            if c is None or (isinstance(c, float) and math.isnan(c)):
+                tot += base[pos]
+                continue
+            w, n_ = champ.get(f"{int(c)}|{pos}", [0.0, 0.0])
+            w, n_ = w * f, n_ * f
+            if n_ > 0:
+                tot += (_logit(w / n_) * n_ + k1 * base[pos]) / (n_ + k1)
+                cov += 1
+            else:
+                tot += base[pos]
+        return tot, cov
+
+    def side_mastery(keys: list[int], pids: list[str] | None) -> tuple[float, float, int]:
+        if not pids:
+            return 0.0, 0.0, 0
+        vals, mins, firsts = [], [], 0
+        for c, pid in zip(keys, pids):
+            if c is None or not pid:
+                continue
+            g = mast.get(f"{pid}|{int(c)}", 0.0) * fm
+            vals.append(min(g, MASTERY_CAP) / MASTERY_CAP)
+            mins.append(g)
+            if g <= 0:
+                firsts += 1
+        return (
+            float(np.mean(vals)) if vals else 0.0,
+            float(min(mins)) if mins else 0.0,
+            firsts,
+        )
+
+    bl, bc = side_logit(blue_champ_keys)
+    rl, rc = side_logit(red_champ_keys)
+    bm, bmin, bf = side_mastery(blue_champ_keys, blue_player_ids)
+    rm, rmin, rf = side_mastery(red_champ_keys, red_player_ids)
+    return {
+        "champ_meta_diff": bl - rl,
+        "mastery_diff": bm - rm,
+        "min_champ_games_diff": bmin - rmin,
+        "n_first_time_champ_diff": float(bf - rf),
+        "champ_cover_min": float(min(bc, rc)),
+    }
