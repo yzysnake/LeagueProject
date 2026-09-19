@@ -20,8 +20,13 @@ tier1_current:          # 2026 在役的一线赛区
   - LCS
   - LCP
   - CBLOL
-  - PCS               # 见下方 open_questions.pcs_vcs_relegation
-  - VCS               # 同上
+
+# 按年份分段的一线赛区：在 valid_until（含）之前算 tier 1，之后算 tier 0。
+# 见修订记录 A2。分段是必须的——一刀切降级会错误地把 PCS 2020-2024、
+# VCS 2019/2022-2024 这些合法的一线赛季也降掉。
+tier1_until:
+  PCS: "2024-12-31"
+  VCS: "2024-12-31"
 
 tier1_aliases:          # 与上面是同一批实体的历史 code
   - LTA N             # 2025 年的 LCS
@@ -61,12 +66,6 @@ excluded_after_review:
 eval_scope: tier1_current + tier1_aliases + tier1_defunct + international
 train_scope: all        # 训宽评窄，见 PLAN.md §6.8
 
-open_questions:
-  pcs_vcs_relegation: >
-    实测 PCS 2020-2024 每年有 2-3 支队伍进世界赛，2025 与 2026 为零，
-    2025 起阵容变成 CFO Academy / PSG Talon Academy 等青训队；VCS 同理，
-    GAM 与 Team Secret Whales 已转入 LCP。按「该年有无队伍出现在 WLDs/MSI」
-    的客观判据，两者 2025 起应降为 tier 0。
-    影响：holdout 窗口内 PCS 53 场 + VCS 37 场，合计 90 场。
-    这是口径判断而非事实错误，**保留 v1 的 tier 1 不变，等使用者决定**。
-    若要改，必须在任何 holdout 评估之前，并同样记进修订记录。
+# 已由使用者于 2026-09-19 裁定：PCS / VCS 自 2025 起降为 tier 0。见修订记录 A2。
+resolved_questions:
+  pcs_vcs_relegation: "已裁定，2025-01-01 起降级，见 tier1_until 与 preregistration A2"
