@@ -1,9 +1,12 @@
 """阶段 0：Oracle's Elixir 年度 CSV 的五重校验 + manifest 登记。
 
 相对手册 v1.1 的修正（均有实测依据，见 docs/PLAN.md §3.2.3）：
-  1. 新鲜度阈值 3 天 → 21 天硬失败 / 10 天告警。
-     实测 2024-2026 赛内最大空档 14 天（2025-11-22 → 2025-12-06），跨年空档 10 天。
-     3 天会在休赛期固定误报。
+  1. 新鲜度阈值 3 天 → 45 天硬失败 / 10 天告警，且冬歇窗口（12-15 ~ 01-31）豁免硬失败。
+     实测全量 2014-2026 的最大无比赛空档是 **34 天**（2024-12-08 → 2025-01-11），
+     其次 28 天（2023-11-27 → 2023-12-25）、26 天（2014）、25 天（2015）。
+     手册原本的 3 天每年固定误报数周；v1.2 建议的 35 天对 34 天只剩 1 天余量，仍偏紧。
+     ⚠️ 本闸的根本局限：它测的是"最后一场比赛离今天多久"，而我们真正关心的是
+     "文件离上次更新多久"。后者要靠 Drive 的 modifiedTime，尚未接入（见 blockers）。
   2. datetime.utcnow() 已在 Python 3.12 废弃 → datetime.now(timezone.utc)。
   3. sha256 改分块读取（单文件最大 109 MB，13 个合计约 700 MB）。
   4. manifest.jsonl 是 append-only 日志，读取时按 year 取最后一条，不是盲读第一条。
@@ -24,7 +27,7 @@ MANIFEST = "data/manifest.jsonl"
 EXPECTED_PREFIX = (
     "gameid,datacompleteness,url,league,year,split,playoffs,date,game,patch"
 )
-STALE_FAIL_DAYS = 21
+STALE_FAIL_DAYS = 45
 STALE_WARN_DAYS = 10
 ROWS_PER_GAME = 12
 
@@ -104,10 +107,14 @@ def validate(path: str, year: int, prev: dict, today: date) -> tuple[dict, list[
     # 闸 5b：当年文件的新鲜度（年初可能尚无比赛，此时跳过）
     if year == today.year and max_date:
         age = (today - date.fromisoformat(max_date[:10])).days
-        if age > STALE_FAIL_DAYS:
+        in_winter_break = (today.month == 12 and today.day >= 15) or today.month == 1
+        if age > STALE_FAIL_DAYS and not in_winter_break:
             raise AssertionError(f"闸5b 失败：数据陈旧 {age} 天，max_date={max_date[:10]}")
         if age > STALE_WARN_DAYS:
-            warns.append(f"新鲜度告警：{age} 天未更新（阈值 {STALE_WARN_DAYS}）")
+            warns.append(
+                f"新鲜度告警：{age} 天未更新"
+                + ("（冬歇窗口，已豁免硬失败）" if in_winter_break else f"（阈值 {STALE_WARN_DAYS}）")
+            )
 
     rec = {
         "year": year,
@@ -148,9 +155,26 @@ def main() -> int:
             f"max_date={rec['max_date']}  {rec['bytes']/1048576:6.1f} MB  {rec['sha256'][:12]}"
         )
 
-    with open(MANIFEST, "a") as mf:
-        for r in recs:
-            mf.write(json.dumps(r, ensure_ascii=False) + "\n")
+    # 按 (year, sha256) 去重：内容没变就不重复追加，否则重跑会把 manifest 撑爆，
+    # 且阶段 0 验收⑤「manifest 恰好 13 条」永远不可能满足。
+    seen = {(r["year"], r["sha256"]) for r in prev.values()}
+    if os.path.exists(MANIFEST):
+        seen = set()
+        for line in open(MANIFEST):
+            line = line.strip()
+            if line:
+                r = json.loads(line)
+                seen.add((r["year"], r["sha256"]))
+    new = [r for r in recs if (r["year"], r["sha256"]) not in seen]
+    if new:
+        tmp = MANIFEST + ".tmp"
+        with open(tmp, "w") as mf:
+            if os.path.exists(MANIFEST):
+                mf.write(open(MANIFEST).read())
+            for r in new:
+                mf.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, MANIFEST)
+    print(f"manifest：新增 {len(new)} 条，已存在 {len(recs) - len(new)} 条未重复写入")
 
     print(f"\n通过 {len(recs)} / {len(files)}，合计 {sum(r['n_games'] for r in recs)} 场")
     for w in all_warns:

@@ -84,6 +84,23 @@ def test_good_file_passes(tmp_path):
 
 
 def test_offseason_gap_does_not_trip_freshness():
-    """实测：2025 赛内最大空档 14 天，跨年 10 天。手册 v1.1 的 3 天阈值必然误报。"""
-    assert dv.STALE_FAIL_DAYS > 14
+    """实测全量 2014-2026 的最大无比赛空档是 34 天（2024-12-08 → 2025-01-11）。
+
+    手册 v1.0 的 3 天、我自己第一版的 21 天、v1.2 建议的 35 天都不够安全。
+    阈值必须严格大于历史最大空档，且留出余量。
+    """
+    OBSERVED_MAX_GAP = 34
+    assert dv.STALE_FAIL_DAYS > OBSERVED_MAX_GAP + 5, (
+        f"阈值 {dv.STALE_FAIL_DAYS} 天对历史最大空档 {OBSERVED_MAX_GAP} 天余量不足"
+    )
     assert dv.STALE_WARN_DAYS >= 10
+
+
+def test_winter_break_exempts_hard_fail(tmp_path, monkeypatch):
+    """1 月初跑时，当年文件可能一场比赛都还没有或只有零星几场，不得硬失败。"""
+    from datetime import date as _date
+    p = tmp_path / "w.csv"
+    shutil.copy(GOOD, p)
+    # 假装今天是 1 月 20 日，而文件最后一场是去年 12 月 21 日（相隔 30 天）
+    rec, warns = dv.validate(str(p), 2014, {}, _date(2015, 1, 20))
+    assert rec["n_games"] == 918
