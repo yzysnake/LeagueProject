@@ -1,6 +1,7 @@
 # LoL 职业赛 BP 后胜率预测系统 · 开发方案
 
-> 版本：**v1.1** ｜ 编制 2026-09-18 ｜ 数据源事实复核 2026-09-18 ｜ 读者：本人（data scientist，独立开发）
+> 版本：**v1.2** ｜ 编制 2026-09-18 ｜ 数据源事实复核 2026-09-18 ｜ 读者：本人（data scientist，独立开发）
+> v1.2 修订要点：修 §8.0 day-0 runbook 里 5 处「照着敲会卡死或静默回退」的实现点（`curl -f` 拦不住 HTTP 200 配额页 → 取数死锁；heredoc 覆盖仓库里已修好的脚本；`uv init` 产物漏 `git add` 导致新克隆 `uv sync --frozen` 失败；`$EDITOR` 未设导致预注册与 git sha 双双落空；补上缺失的第 0 条 uv 安装）；新鲜度闸 **3 天 → 35 天硬失败 / 10 天告警**（实测 2023 冬歇 27 天，3 天每年固定误报）并给 1 月冷启动加豁免；manifest 改 sha256 去重 + 原子落盘；新增 **§7.11「外部凭证与账号需求」**（结论：零凭证即可开始）；修正 Leaguepedia 匿名可用 / Riot dev-key / Drive OAuth / OE Patreon 四处会误导的凭证说法。
 > v1.1 修订要点：修正 4 处已过期的 [实测] 数据源事实（OE manifest 冻结 / `firstPick` 已回填全历史 / 2026 赛区 code 改回 `LCS`·`CBLOL` / Drive 直连恢复可用）；删掉未经测量的 `n_eff = n/2.5`，改为实测 ICC + block bootstrap；修 `series_id`、`dropna`、holdout 冻结三处"照做会静默出错"的实现点；新增 §8.0「第一天的 20 条命令」。
 > 本文是工作手册，不是建议清单。每一节都应当能照着做。
 > 数据快照基准（**v1.1 更新**）：v1.0 的基准是本机 `scratchpad/` 下 OE 2022–2025 四个陈旧快照（均 164 列，2025 最后一天 2025-11-16）——**全文凡是基于"本机快照"的 schema 结论都已在 2026-09-18 用线上文件复核并改写**。当前基准：**2026 线上文件 = 70,932,929 bytes / 105,984 行 / 8,832 场 / 165 列 / `max(date) = 2026-09-18 11:51:26`**，且 2014–2026 **全部 165 列、全部含 `firstPick`**。
@@ -27,6 +28,7 @@
 1. 任何数字，先问"这个样本量能不能分辨出这么大的差异"。分辨不出的，不准写成"改进"。
 2. 任何特征，先问"它在严格时间外推下、连续两个留出期是否同号"。不同号的，不进模型。
 3. 任何数据，先问"这个文件是不是 2009 字节的 Google Drive 错误页"。本机 `scratchpad/` 里此刻就躺着 5 个这样的假 CSV（`oe2021.csv` / `oe2026.csv` / `oe_2025.csv` / `oe_2026.csv` / `t2021.csv`，全部 2009 字节）**[实测]**。
+   **Drive 的 HTML 伪装有两种** **[实测 2026-09-18]**：2,009 字节的 `Quota exceeded`，和 **2,467 字节的 `Virus scan warning`**（>100 MB 的文件走 legacy `drive.google.com/uc` 端点时出现；2021 是唯一 >100 MB 的年份，109.8 MB）。所以校验判据必须是**「首个非空白字符不是 `<`」**，而不是「不含 `Quota exceeded`」——现有 `validate()` 已经这么写了，**重构时别退化成只查关键字**。
 
 ---
 
@@ -279,7 +281,7 @@ M_main(全特征) vs L3(side_prior + team rating + player rating)
 | L1 | **feed.lolesports.com livestats** | 实时阵容（10 英雄 + 选手 ID + patch） | 30s 轮询 | 非官方，无 SLA | **[实测]** | 否（可降级） |
 | L2 | **Data Dragon** | 英雄元数据、patch 时间轴、前端图标 | 版本变更时 | 免费 CDN | **[实测]** 16.18.1 / 173 英雄 | **是** |
 | L2 | CommunityDragon | 新英雄补位 | 同上 | 免费 | **[实测]** | 否 |
-| L3 | **Leaguepedia Cargo** | first-pick 归属 / roster / 交叉校验 | 每日增量 | CC BY-SA | **[实测]** 匿名可用但需限速 | 否（补充） |
+| L3 | **Leaguepedia Cargo** | first-pick 归属 / roster / 交叉校验 | 每日增量 | CC BY-SA | **[实测 2026-09-18]** 匿名 11 次查询只成功 1 次，**实际不可用**；必须注册免费 Fandom 账号 + `Special:BotPasswords` + 确认邮箱（§7.11） | 否（补充） |
 | L3 | **HF `gptilt/lol-esports-matches`** | 低级别赛事补量 / 交叉校验 | 每周 | CC BY-SA 3.0 | **[实测]** 136,956 场 | 否（补充） |
 | L4 | Polymarket | 外部基准（市场共识） | 每日 | 公开 API | **[实测]** 无鉴权可用 | 否（v2） |
 
@@ -388,62 +390,104 @@ python -m lolwp.ingest.oracles_elixir --validate "${YEAR}.csv.tmp"   # 五重校
    → 全选 → "创建副本 / Make a copy" 到自己的 Drive → 从自己的副本下载
    （配额记在文件所有者 Tim Sevenhuysen 账号上，你的副本走你自己的配额）
    ⚠ 70 MB × 13 个文件，手工做一次很痛，所以它是兜底不是主路径
+   **这一级需要的全部东西：一个普通的免费 Google 账号**（个人 Gmail 即可，15 GB 免费空间；
+   13 个文件合计 **849.6 MB**，占 5.7%）。**不需要付费、不需要 Workspace、不需要 API key。**
+   而且通常不用复制 13 个——2014–2025 是冻结文件，本地已有就不用再取；日更只涉及 2026
+   那一个 71 MB 的文件，复制它一个就够。复制完记得删，避免长期占用。
 4. Streamlit 侧栏的 `st.file_uploader` 始终是一等公民：任何时候都能手工塞一份 CSV 进来
 5. 下载成功后一律推进自建镜像（按 snapshot_date 归档），训练代码只读自建镜像
 ```
 
+**端点只有一个能用** **[实测 2026-09-18]**：`confirm=t` **只在 `drive.usercontent.google.com/download` 上有效**。legacy 的 `drive.google.com/uc` 与 `docs.google.com/uc` 加了也没用——对 >100 MB 的文件（2021，109.8 MB）它们一律返回 HTTP 200 + 2,467 字节的 `Virus scan warning` HTML；对 <100 MB 的文件才碰巧返回真 CSV。**代码里只准出现 `drive.usercontent.google.com/download`。**
+
 **关于 `gdown`**：gdown ≥5 走的就是上面这个端点，所以它**没有任何绕过配额的能力**——配额耗尽时它一样失败。不用它的理由是"多一层依赖、错误信息更难读"，不是"它不管用"。配额确实与你的出口 IP 无关：配额耗尽窗口内，三个互不相干的出口（家宽 Comcast / 服务器出口 / r.jina.ai 代理）实测同错 **[实测]**，换 IP / 挂代理 / 换机器都没用，只能等或走兜底。
 
-**长期自动化方案（可选，第二阶段再做）**：Google Drive API v3 + OAuth（scope `drive.readonly` + `drive.file`），程序化地把文件 copy 进自己 Drive 再下载、下完即删。端点 `https://www.googleapis.com/drive/v3/files/{id}?alt=media&key={API_KEY}` 实测存在（无 key 时返回结构化 403）**[实测]**。凭证进 `.gitignore`，绝不打进 docker 镜像。
+**【不要做】Google Drive API v3 + OAuth 自动 copy** **[实测 2026-09-18 复核]**。v1.1 把它列为"可选的长期自动化方案"，只验证了端点存在（`https://www.googleapis.com/drive/v3/files/{id}?alt=media` 无 key 时返回结构化 403），没验证授权成本。真实成本：
+
+- `https://www.googleapis.com/auth/drive.readonly` 在 Google 官方文档里属 **restricted scope**（"wide access to Google user data"）。
+- OAuth 同意屏幕停在 **Testing** 状态（个人用、免费）时，**refresh token 每 7 天过期**——自动化每周断一次，比它想替代的人工兜底还麻烦。
+- 要 publish 到 Production 就需要 restricted-scope verification + 第三方 **CASA 安全评估（付费，约 $500–$4,500/年，需年度复审）**。这是整个项目**唯一一个可能花钱的地方，而且可以完全避开**。
+- `drive.file` 单独不够用：它只能访问本 app 创建或经 Picker 打开的文件，**读不到 Tim 账号下的那 13 个 CSV**。
+
+**结论：直连 + 五重校验 + 自建镜像 + 极少数情况下手工 Make-a-copy，已经覆盖全部场景，且零成本零凭证。**
 
 ### 3.2.3 五重校验（少一条就会被静默污染）
 
+> **这是说明用的教学版；生产实现以仓库的 `scripts/day0_validate.py` 为准**（两者的闸门强度必须一致，改一边就改另一边）。
+
 ```python
 import csv, os
-from datetime import date, datetime, timedelta
+from collections import Counter
+from datetime import date, datetime, timezone
 
 EXPECTED_PREFIX = ("gameid,datacompleteness,url,league,year,split,"
                    "playoffs,date,game,patch")
+ROWS_PER_GAME = 12
+STALE_WARN_DAYS, STALE_FAIL_DAYS = 10, 35      # 为什么是 35 而不是 3，见下方
 
-def validate_oe_csv(path: str, year: int, prev: dict) -> None:
-    """五条断言全过才准 os.replace()，任一失败 -> 保留旧文件 + 非零退出 + 告警
+def validate_oe_csv(path: str, year: int, prev: dict) -> list[str]:
+    """五条断言全过才准 os.replace()，任一失败 -> 保留旧文件 + 非零退出 + 告警。
+    返回非致命告警列表。
 
     prev = 上一次成功 ingest 的 manifest.jsonl 里同年那条记录（冷启动时为 {}）。
     ★ 参照系是【我们自己上一次的快照】和【数据本身的日期】，不是任何第三方接口。
     """
+    warns = []
+    today = datetime.now(timezone.utc).date()   # OE 的 date 列是 UTC，别和本地时钟混用
+    # 当年文件的 1 月冷启动期：赛季首场落在 1/8–1/11，累计体积要到 1/16–1/19 才过 1 MB
+    # [实测 2023/2025/2026] → 这段窗口里闸 2/闸 4 的下界必须放宽，否则会在完全正确的文件上炸
+    bootstrap = (year == today.year and today < date(year, 2, 1))
 
-    # 闸 1: MIME / 内容特征 —— 抓 quota HTML
+    # 闸 1: MIME / 内容特征 —— 抓一切 HTML 伪装
+    #   ★ 判据是"不以 < 开头"，不是"不含 Quota exceeded"：Drive 至少有两种 HTTP 200 伪装页，
+    #     2,009 B 的 Quota exceeded 和 2,467 B 的 Virus scan warning（§0）
     head = open(path, 'rb').read(4096)
+    assert not head.lstrip().startswith(b'<'), "拿到的是 HTML 不是 CSV（Drive 配额页/病毒扫描页）"
     assert b'Quota exceeded' not in head, "Drive 配额错误页（HTTP 200 伪装）"
-    assert not head.lstrip().startswith(b'<'), "拿到的是 HTML 不是 CSV"
 
     # 闸 2: 体积 —— quota 页恰好 2009 字节
-    assert os.path.getsize(path) > 1_000_000, "文件过小"
+    size = os.path.getsize(path)
+    assert size > (2_048 if bootstrap else 1_000_000), f"文件过小: {size} bytes"
 
     # 闸 3: 表头前缀
-    first = head.decode('utf-8', 'replace').split('\n')[0]
+    first = head.decode('utf-8', 'replace').split('\n')[0].strip().lstrip('\ufeff')
     assert first.startswith(EXPECTED_PREFIX), f"表头异常: {first[:80]}"
 
     # 闸 4: 结构 —— 注意 n_games > 0 这一半！0 % 12 == 0 会放行空文件
-    n_rows, games, max_date = 0, set(), ''
+    n_rows, per_game, max_date = 0, Counter(), ''
     with open(path, newline='', encoding='utf-8', errors='replace') as f:
         for row in csv.DictReader(f):
             n_rows += 1
-            games.add(row['gameid'])
-            if row['date'] > max_date:      # 'YYYY-MM-DD HH:MM:SS'，字典序 == 时间序
+            per_game[row['gameid']] += 1
+            if (row.get('date') or '') > max_date:   # 'YYYY-MM-DD HH:MM:SS'，字典序 == 时间序
                 max_date = row['date']
-    assert len(games) > 0,                "解析出 0 场比赛"
-    assert n_rows == 12 * len(games),     f"非 12 行/场: {n_rows} 行 / {len(games)} 场"
+    n_games = len(per_game)
+    bad = {g: c for g, c in per_game.items() if c != ROWS_PER_GAME}
+    assert not bad, f"非 12 行/场: {len(bad)} 场，例 {list(bad.items())[:3]}"
+    assert n_rows == ROWS_PER_GAME * n_games, f"行数 {n_rows} != 12 × {n_games}"
+    assert bootstrap or n_games > 0, "解析出 0 场比赛"   # 1 月冷启动期 0 场是合法的
 
-    # 闸 5: 新鲜度 —— 抓"内容合法但陈旧"的镜像，这是前四条抓不到的
-    #   ★ 两条都是【单侧】的：只拦"比已知的更旧 / 更少"，绝不拦"比已知的更新 / 更多"
-    if year == date.today().year:           # 只有当年文件才该是新鲜的
-        age = date.today() - datetime.strptime(max_date[:10], '%Y-%m-%d').date()
-        assert age <= timedelta(days=3), f"数据陈旧: max(date)={max_date}，距今 {age.days} 天"
+    # 闸 5a: 单调性 —— 这才是真正抓"镜像投毒"的那条，历史年份同样要查，
+    #        所以【放在 year 判断之外】，别塞进 if year == today.year 里
+    #   ★ 两边都必须 [:10] 归一：manifest 里可能存 '2026-09-18'，也可能存
+    #     '2026-09-18 11:51:26'，不归一会在格式回摆时误报"倒退"
+    cur_d, prev_d = max_date[:10], (prev.get('max_date') or '')[:10]
+    assert not (prev_d and cur_d and cur_d < prev_d), f"max_date 倒退: {prev_d} -> {cur_d}"
     if prev.get('n_games'):                 # OE 只回填、不删档 → 同年场次单调不减
-        assert len(games) >= prev['n_games'] * 0.95, \
-            f"场次倒退: {len(games)} < 上次快照 {prev['n_games']} 的 95%"
+        assert n_games >= prev['n_games'] * 0.95, \
+            f"场次倒退: {n_games} < 上次快照 {prev['n_games']} 的 95%"
+
+    # 闸 5b: 绝对陈旧度 —— 休赛期属常态，所以告警为主，硬失败只兜"彻底断更"
+    if year == today.year and cur_d:
+        age = (today - date.fromisoformat(cur_d)).days
+        assert age <= STALE_FAIL_DAYS, f"数据陈旧 {age} 天（max_date={cur_d}）"
+        if age > STALE_WARN_DAYS:
+            warns.append(f"{year}: {age} 天未更新（休赛期属正常，请人工确认）")
+    return warns
 ```
+
+**为什么闸 5b 是 35 天而不是 v1.1 写的 3 天** **[实测 2026-09-18]**：拿 2023–2026 的真实赛程逐日模拟"当天文件只含 `date <= D` 的比赛"，`age <= 3` 每年固定误报——2023 有 **25** 天硬失败（`2023-12-01..12-24` 连续 24 天，最大 age **27**）、2024 有 20 天（最大 23）、2025 有 11 天、2026 至今 3 天。这些窗口是**休赛期 + 赛季中段空档**（如 2026-06-25..06-27，前后 6/21 有 48 行、6/28 有 72 行），不是数据出问题。阈值扫描：`>21` 天仍残余 2023 六天 / 2024 两天；**`>30` 天时 2023–2026 全部为 0**，故取 35 留余量。
+提高到 35 **不削弱**阶段 1 验收②的投毒用例——"`date` 只到 2026-03 的陈旧快照"在 9 月检查是约 **190 天**，照样被拦下；而真正抓镜像投毒的主力是闸 5a 的单调性（它不受阈值影响）。
 
 **闸 4 的括号内容是整份文档里最容易被跳过、但最该记住的一行**：调研里三份方案都只写了 `rows % 12 == 0`，而 `0 % 12 == 0` 为真。
 
@@ -456,7 +500,7 @@ v1.0 的闸 5 是 `assert abs(n_games − manifest_games)/manifest_games < 0.05`
 三条修正，已体现在上面的代码里：
 
 1. **单侧下界**：改成 `n_games >= 上一次快照的 n_games × 0.95`。只拦"比已知快照还少"（真正的截断/投毒），不拦"比参照值多"（正常增长）。
-2. **校验数据本身而不是第三方计数**：`assert max(date) >= today − 3 days`。本次实测 `max(date)=2026-09-18`，这条能直接抓住"3 月快照投毒"（GitHub 镜像那类），**且不依赖任何外部接口**。
+2. **校验数据本身而不是第三方计数**：`assert (today − max(date)).days <= 35`（>10 天先告警）。本次实测 `max(date)=2026-09-18`，这条能直接抓住"3 月快照投毒"（GitHub 镜像那类，约 190 天），**且不依赖任何外部接口**。阈值取 35 而不是 v1.1 的 3，是因为 3 天会被休赛期每年固定误报（2023 冬歇连续 24 天），理由与实测见上方代码块后的说明。
 3. **参照系换成 `manifest.jsonl` 自己**：OE 只回填、不删档，所以同年 `n_games` 单调不减是一条可靠且自洽的不变量。
 
 **`oe.datalisk.io` 整个从 `daily.sh` 和闸 5 里移除**，降级为本文档里的一条可选参考（无需下载就能大致知道各年样本量）。这也兑现了 v1.0 自己写下的合规承诺——它本来就写着"只用作低频探针，不写进生产关键路径"，而闸 5 恰恰**就是**生产关键路径。
@@ -658,6 +702,8 @@ GET /getEventDetails?hl=en-US&id={matchId} → match.games[] 每个含 {id, numb
 GET /getTeams?hl=en-US                   → 不带 id 返回全部 1,578 队 / 4,770 选手
 ```
 
+> **这个 `x-api-key` 不是需要你去申请的凭证。** 它是 lolesports 前端硬编码的**公开常量**，多个开源项目用的都是同一个值，**没有任何申请流程、不需要注册、不会过期** **[实测 2026-09-18：不带 → 403 / 带它 → 200 / 伪造 → 403]**。**别去 Riot Developer Portal 白跑一趟**——那是另一套东西（§7.11）。
+
 关键 leagueId：`worlds 98767975604431411` / `msi 98767991325878492` / `first_stand 113464388705111224` / `lck 98767991310872058` / `lpl 98767991314006698` / `lec 98767991302996019` / `lcs 98767991299243165` / `lcp` / `pcs 104366947889790212` / `vcs 107213827295848783` / `lta_n 113470291645289904` / `lta_s 113475181634818701`。注意 slug 是 `cblol-brazil`、`ljl-japan`。
 
 **`getTeams` 不带 id 一次返回全量**（1.55 MB，1,185 支 active 队伍、每名选手 `{id, summonerName, firstName, lastName, role}` + `homeLeague`）。这是选手选择器"自动带出常规首发"的现成数据源，也是 ID crosswalk 的桥。每周落地一次。
@@ -776,13 +822,20 @@ RekSai, Renata, TahmKench, TwistedFate, Velkoz, XinZhao
 
 ## 3.5 Leaguepedia Cargo（L3，补充源，非硬依赖）
 
-### 3.5.1 【已证伪】三处流传的错误说法
+### 3.5.1 唯一的前置条件：注册一个免费 Fandom 账号
+
+> ⚠️ **v1.2 更正（v1.1 这里写错了）**：v1.1 说"匿名可用，空闲 75–90 秒后单发稳定成功"。**[实测 2026-09-18 已证伪]**：严格 100 秒等间隔发 6 次 → 只有第 1 次成功；空闲 420 秒后再发 → 仍然 ratelimited；两轮合计 **11 次查询只成功 1 次（9%）**。权限侧也对得上：`meta=siteinfo&siprop=usergroups` 显示 `runcargoqueries` 只授予 `user` 组，匿名（`*`）根本没有这个权限；`noratelimit` 只在 `bot`/`sysop`/`staff`。Leaguepedia 官方指引原文："Fandom added new ratelimits for cargo queries which make it really difficult to query while logged out... it's really important to log in with a bot password first and confirm your email address."
+
+**所以 Leaguepedia 的前置条件是硬的**：注册一个免费 Fandom 账号 → `Special:BotPasswords` 勾选 Cargo → `Special:Preferences` 确认邮箱。**自助、无审批、约 5 分钟。不做这步，L3 的任何代码都会拿到 0 行。**
+
+**[仍然成立的两条已证伪]**：
 
 | 说法 | 核查结论 |
 |---|---|
-| "匿名 cargoquery 完全不可用，怎么重试都 ratelimited" | **[已证伪]** 匿名可用。空闲 75–90 秒后单发查询稳定成功，一次能拿满 500 行 |
 | "必须申请 bot 用户组权限" | **[已证伪]** 只需注册账号 → `Special:BotPasswords` 自助勾选 Cargo 权限 → 确认邮箱。**全程自助无审批，5 分钟** |
 | "bot 组 = 5,000 行/页" | **[已证伪]** 5,000 是 **admin 管理员**专属。普通账号（含 bot password）仍是 **500 行/页硬上限**，`limit=5000` 服务端直接报错 |
+
+⚠️ 注意 BotPassword **不会**把你放进 `bot` 用户组（只有那个组才有 `noratelimit`，需向 Fandom 申请），所以登录后仍可能被限流。**别把 L3 排进关键路径。**
 
 ### 3.5.2 真实的限流行为（这才是"感觉永远被限流"的原因）
 
@@ -796,7 +849,11 @@ RekSai, Renata, TahmKench, TwistedFate, Velkoz, XinZhao
 
 **机制：被限流的请求本身也会计数并续期惩罚。** 一旦打爆就进入长惩罚期。所以"多试几次"只会让情况更糟。
 
-**正确姿势**：严格串行、单线程、每次**成功后** `sleep 75~90s`、遇 ratelimited 走指数退避（90→180→360→封顶 600s）、绝不并发。有效吞吐约 **500 行 / 75–90 秒 ≈ 2–2.4 万行/小时**。
+**正确姿势**：严格串行、单线程、每次**成功后** `sleep 75~90s`、遇 ratelimited 走指数退避（90→180→360→封顶 600s）、绝不并发。
+
+**吞吐（v1.2 更正）**：v1.1 写的"≈ 2–2.4 万行/小时"是按匿名档位推算的，**已作废**。
+- **匿名档位：不可用于生产**，只适合偶发单次手查（实测有效吞吐约 500 行 / 25 分钟 ≈ 1,200 行/小时，是 v1.1 宣称值的 5%）。
+- **登录档位（bot password）：吞吐尚未实测**（复核时无账号）。**第一次用之前必须自己实测一遍，并把真实数字写回本节**，不要照抄任何推算值。
 
 另外：HTML 页面被 Cloudflare 挡（`cf-mitigated: challenge`），但**跟数据采集完全无关**——走 `api.php` 即可，连 wiki 正文都能用 `action=query&prop=extracts` 读出来。
 
@@ -869,7 +926,7 @@ ds = load_dataset('gptilt/lol-esports-matches', name='games', split='train')
 | **GRID Open Access** | 页面明确只含 **CS2 和 Dota 2**，LoL 属单独付费的 Competitor Portals **[实测]** |
 | **Bayes / BEDEX** | 不公开价格，B2B 商业授权；唯一免费口子是仅供联调的 "training wheels" 回放流 |
 | **Riot LoL Esports Data Portal (LDP)** | 只面向 Riot 运营赛区和 Leaguepedia/OE 这类社区伙伴，无个人申请通道 |
-| **solo queue 自采（v1）** | Riot dev key 限流 20 req/1s 且 100 req/2min、**24 小时失效**，官方明文 "You may not run your application for public consumption using a personal key"。采 50 万场是多周独立工程 + production key 审批不可控 |
+| **solo queue 自采（v1）** | 需要一个**免费 Riot 账号**。两个档位：**development key** 登录即得但**每 24 小时失效**；**personal key** 在 Developer Portal 注册一个 personal product 即可拿到，**无审批、不失效**，限流同为 20 req/1s + 100 req/2min。本地研究工具用 personal key 完全合法（"not for public consumption" 只禁**公开**产品），**所以排除它的理由不是审批，而是吞吐**：50 req/min → 50 万场约需 **167 小时**连续采集，外加 league-v4/match-v5 的 ID 发现工程。**v2 backlog**（§7.11） |
 | **lolalytics / u.gg / op.gg** | 沙箱实测全部 000/403，有反爬保护，ToS 不明 |
 | **Kaggle `lauffing/oracles-elixir-...`** | 许可 **CC BY-NC-SA 4.0（NonCommercial）**，将来若想商业化要避开；直接用 OE 原始文件 |
 | **GitHub LFS 镜像作为生产源** | 见 §3.2.2，陈旧 6–7 个月、schema 不一致、随时消失 |
@@ -1112,12 +1169,13 @@ snapshots/<snapshot_id>.json              # {snapshot_id, 各年 sha256, git_sha
  "sha256":"...","bytes":70932929,"content_length":70932929,
  "n_rows":105984,"n_games":8832,"n_cols":165,"header_sha1":"...",
  "max_date":"2026-09-18 11:51:26",
- "drive_modified_raw":"12:03 pm",
+ "drive_modified_raw":"12:03 pm",
  "drive_modified_parsed":null,
  "fetched_at":"2026-09-18T09:12:03Z","mirror_used":"drive_direct"}
 ```
 
-> **字段说明（v1.1 修正）**：`drive_modified_raw` 是 Drive 目录页的**本地化显示串**（`Jun 8` / `Jul 2` / `12:03 pm`，无年份或无日期），**不是 ISO 时间戳、不可作身份键**（§3.2.1）。去重一律用 `content_length` + `sha256`；`max_date` 是闸 5 的新鲜度依据；`n_games` 是闸 5 的单调不减参照。
+> **字段说明（v1.1 修正）**：`drive_modified_raw` 是 Drive 目录页的**本地化显示串**（`Jun 8` / `Jul 2` / `12:03 pm`，无年份或无日期），**不是 ISO 时间戳、不可作身份键**（§3.2.1）。去重一律用 `content_length` + `sha256`；`max_date` 是闸 5 的新鲜度依据；`n_games` 是闸 5 的单调不减参照。
+> ⚠️ **`12:03 pm` 里的不是普通空格，是 U+202F 窄不换行空格**（Google 本地化输出）**[实测]**——肉眼与普通空格完全一样。**不要对这个字段做 `split(' ')` 或字符串相等比较**；它叫 `raw` 就是原样存档用的，任何解析都应先显式 `.replace('\u202f', ' ')`。
 
 **为什么必须做快照**：OE 会**持续回填修订历史数据**。实测同一年份不同快照场次能差 4%（2024 年 GitHub 镜像 9,804 场 vs OE manifest 10,195 场）。**"重跑相同代码得到不同结果"是常态**，不锁快照的话报告里每个数字都不可复现。
 
@@ -1175,7 +1233,8 @@ df = pd.read_csv(path, usecols=lambda c: c in WHITELIST_30)
 
 缺列显式补空并告警，新增列默认忽略而非报错。加一个 schema 契约测试：断言 `gameid/datacompleteness/league/date/patch/side/result/champion/playerid/teamid/ban1..5` 这批必需列存在，缺任一就中断。
 
-同时订阅 OE Discord 的 `oe-data-updates` 频道（`https://discord.gg/GsauAGAr6`）获知 schema 变更。
+同时订阅 OE Discord 的 `oe-data-updates` 频道（`https://discord.gg/x54QyZ2VCa`，需一个免费 Discord 账号）获知 schema 变更——这是 §0「证据保质期纪律」和本节唯一的上游预警渠道。
+⚠️ **[实测 2026-09-18]** 到处流传（包括 OE 官网正文里）的 `https://discord.gg/GsauAGAr6` **已失效**（`Unknown Invite`, HTTP 404），**别照抄**。
 
 ## 3.13 被核查证伪的内容汇总（速查）
 
@@ -1186,7 +1245,7 @@ df = pd.read_csv(path, usecols=lambda c: c in WHITELIST_30)
 | 3 | `rows % 12 == 0` 足以校验文件 | `0 % 12 == 0` 会放行空的 quota HTML；必须五重校验且含 `n_games > 0` | §3.2.3 |
 | 4 | gdown 能绕过配额 | gdown 走的就是同一个端点，配额耗尽时它一样失败（但配额是**间歇性**的，直连通常可用） | §3.2.2 |
 | 5 | 配额是本机 IP 被限流 | 三个互不相干的出口同错，是文件所有者账号的配额 | §3.2.2 |
-| 6 | Leaguepedia 匿名完全不可用 | 匿名可用，空闲 75–90s 后单发稳定成功，500 行/次 | §3.5.1 |
+| 6 | ~~Leaguepedia 匿名完全不可用~~（**v1.1 这条判错了，v1.2 撤回**） | **[实测 2026-09-18]** 匿名 11 次查询只成功 1 次；`runcargoqueries` 权限本就只给 `user` 组。**必须注册免费 Fandom 账号 + BotPasswords + 确认邮箱** | §3.5.1 |
 | 7 | 需要申请 bot 用户组 | `Special:BotPasswords` 自助生成，5 分钟，无审批 | §3.5.1 |
 | 8 | bot 组 = 5,000 行/页 | 5,000 是 admin 专属；普通账号含 bot password 仍是 500 行硬上限 | §3.5.1 |
 | 9 | `firstPick` 只有 2026 文件有（并据此推翻 arXiv 的 baseline 设计） | **[2026-09-18 复核] v1.0 这条已过期**：OE 已把 `firstPick` 回填进 2014–2026 全部年份（全部 165 列）。真正的限制是 2026 之前 `firstPick ≡ (side==Blue)`（2025 实测 100%）、与截距共线零信息，2026 才解耦到 70.2% | §3.2.5 |
@@ -2068,7 +2127,7 @@ result ~ side + (1|league) + (1|team) + (1|player) + (1|champion) + (1|player:ch
 | Transformer 主力路线 | 最小配置 3–5 万参数，而它要学的恰是信号最弱的那部分 |
 | **stacking / 学权重的集成** | 需再切一层 OOF 缩短有效训练窗口；即使真带来 0.002 提升也需 ~31,000 场才能检出；且摧毁 what-if 页面赖以生存的可解释性 |
 | 独立的 Elo "模型" | Elo 应该是 logistic 的输入特征，直接用 Elo 公式出概率会丢掉那个 1.28 的缩放系数 |
-| solo queue 自采（v1） | dev key 24h 失效 + 100 req/2min，采百万场是多周工程 + production key 审批不可控。**v2 再说** |
+| solo queue 自采（v1） | personal key 无审批可得（不必用 24h 失效的 development key，也不必申 production key），但 100 req/2min 的吞吐意味着 50 万场 ≈ 167 小时连采 + ID 发现工程。**v2 再说**（§3.8 / §7.11） |
 | conformal prediction | 二分类下给的是标签集合 `{}/{蓝}/{红}/{蓝,红}`，对"胜率是多少"没用 |
 
 **唯一允许的"集成"**：2–3 个结构不同模型的**固定等权 logit 平均**，不学权重。成本几乎为 0，降低单模型崩掉的风险，解释性退回主模型。且必须满足 `ΔLL > MDE` 才上线。
@@ -2864,6 +2923,11 @@ LeagueProject/
 ├─ uv.lock                   # ★ 提交进 git
 ├─ Makefile
 ├─ .env.example              # LOLWP_LOLESPORTS_KEY / LOLWP_LP_BOT_USER / ...
+│                            #   ★ LOLWP_LOLESPORTS_KEY 是 lolesports 前端写死的公开常量
+│                            #     (0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z)，无需申请、
+│                            #     无需注册；放 .env 只是为了方便轮换、避免打进公开仓库
+│                            #   ★ LOLWP_LP_BOT_USER/PASS 才是真要自己注册的（免费 Fandom
+│                            #     账号 + Special:BotPasswords，§3.5.1 / §7.11）
 ├─ .gitignore                # data/, models/, *.json 凭证
 ├─ docs/PLAN.md              # 本文件
 ├─ experiments/
@@ -3458,18 +3522,78 @@ curl -s localhost:8000/health | jq .run_id   # 确认已切回
 5. **OE 每天只 ingest 一次**。官方原文 "There is no value in downloading the files more frequently than this."，且配额挂在维护者个人账号上——**你的滥用会影响整个社区**。Leaguepedia 的 API 原文是 "made available as a courtesy"，同理。
 6. 若将来商业化：避开 Kaggle 上 CC BY-NC-SA 4.0 的那个镜像；lolesports 的公开 key 在商业用途下应改走正式授权。
 
+## 7.11 外部凭证与账号需求（**敲第一条命令之前先看这一节**）
+
+> **一句话结论：这个项目零凭证即可开始，没有任何必须付费的东西，主路径全程匿名。**
+> **[实测 2026-09-18]** 13 个 OE 年度文件今天全部**匿名直连**成功（13/13，849.6 MB，含唯一 >100 MB 的 2021，109.8 MB，完整下载并通过 12 行/场校验）。你**不需要** Google 账号就能跑完 §8.0 的全部命令。
+
+### 第一天必须准备的东西
+
+| 依赖 | 是否需要凭证 | 说明 |
+|---|---|---|
+| **Oracle's Elixir Google Drive**（L0 主数据） | **完全不需要** | 匿名 curl，无 cookie / 无登录 / 无 API key。13/13 全部 HTTP 206 + 真 CSV |
+| **lolesports persisted API**（L1） | **完全不需要** | `x-api-key: 0TvQnueq...` 是前端硬编码的**公开常量**，无申请流程（§3.3.1） |
+| **feed.lolesports.com livestats**（L1） | **完全不需要** | 零鉴权，不带任何 header 就能取 window / details |
+| **Data Dragon / CommunityDragon**（L2） | **完全不需要** | 公开 CDN |
+| **HF `gptilt/lol-esports-matches`**（L3） | **完全不需要** | 仓库 public 且非 gated；无 token 直下 parquet 成功（token 只提高限速） |
+| **Polymarket**（L4） | **完全不需要** | 只需带 User-Agent（裸 urllib 会 403，§3.7） |
+| **PyPI / GitHub / GHCR** | **完全不需要** | §8.0 的 15 个包 + §10 的两个 git 依赖全部匿名可装；镜像走 GHCR 不吃 Docker Hub 限流 |
+| **Leaguepedia Cargo**（L3，补充源） | **需要一个免费 Fandom 账号** | 注册 → `Special:BotPasswords` 勾 Cargo → 确认邮箱。**自助、无审批、约 5 分钟**。不做这步匿名查询实测 11 次只成功 1 次（§3.5.1） |
+| **OE Discord `oe-data-updates`** | **需要一个免费 Discord 账号** | `https://discord.gg/x54QyZ2VCa`。这是 schema 变更的**唯一上游预警渠道**（§0 / §3.12.4） |
+
+### 可选，各自能换来什么
+
+| 项目 | 成本 | 收益 |
+|---|---|---|
+| 免费 Google 账号 | 免费（15 GB 够装 849.6 MB） | Drive 配额耗尽时的 Make-a-copy 人工兜底（§3.2.2 第 3 级）。通常只需复制当年那 1 个 71 MB 文件 |
+| 免费 Riot 账号 → 注册 personal product | 免费、**无审批**、20 req/1s & 100 req/2min | v2 的 solo-queue counter 特征。真正的阻塞是吞吐（50 万场 ≈ 167 小时连采），不是审批（§3.8 / §9.3） |
+| 免费 HuggingFace token | 免费 | 只提高下载限速，非必需 |
+| **OE Patreon $3/月** | **付费** | 幻想联赛推荐 / Discord 角色 / 独家内容。**不解锁任何数据、不提高任何配额**——OE 官方原文数据 "provided free of charge" |
+
+### 完全不需要（别去申请，会白跑）
+
+Google Drive 登录或 Drive API key（主路径）、lolesports key 申请、livestats 鉴权、DDragon/CommunityDragon key、Polymarket 账号、HuggingFace 登录、Docker Hub 账号、任何云服务、任何 LLM API。
+**Riot production key 只在公开部署时才需要**（约 2 周审批 + working prototype），且 Riot 政策禁止 betting 与 "MMR or ELO calculators"。
+**Google Drive API v3 + OAuth 这条路不要走**——`drive.readonly` 是 restricted scope，Testing 模式 refresh token 7 天过期，publish 要付费 CASA 评估（$500–$4,500/年）。详见 §3.2.2。
+
 ---
 
 # 8. 分阶段开发流程
 
-## 8.0 第一天的 20 条命令（逐行可复制）
+## 8.0 第一天的 22 条命令（逐行可复制）
 
-v1.0 有 3,500 行代码片段和验收标准，却没有一条可以直接粘的起步命令；`make bootstrap` 只有注释没有 body；而 §6.1.3 让你第一天运行一个第 3 周才存在的包（`lolwp.eval.freeze_holdout`），形成一个解不开的依赖环。这一节把它补上——**这 20 条命令不依赖 `lolwp` 包里的任何东西**，半小时内跑完。
+v1.0 有 3,500 行代码片段和验收标准，却没有一条可以直接粘的起步命令；`make bootstrap` 只有注释没有 body；而 §6.1.3 让你第一天运行一个第 3 周才存在的包（`lolwp.eval.freeze_holdout`），形成一个解不开的依赖环。这一节把它补上——**这些命令不依赖 `lolwp` 包里的任何东西**，半小时内跑完。
+
+> **动手前先读 §7.11**：这一整节**不需要任何账号、任何 API key、任何付费**。唯一要自己注册的（免费 Fandom + Discord）与 day-0 无关，可以之后再办。
+>
+> **v1.2 的三条护栏**（v1.1 在这里踩过坑）：
+> 1. 三个 `scripts/day0_*.py|sh` 一律写成 `[ -f X ] || cat > X <<'EOF'`。**v1.1 用的是无条件 `cat >`，重跑第 7/10/11 条会静默覆盖掉仓库里已经修好的脚本**（6,098 B → 2,284 B，退出码 0，无任何提示）。
+> 2. 全节**不使用 `set -e`**。这是一份要粘进交互终端的清单，裸 `set -e` 下第一条失败的命令会**直接关掉你的终端会话**（zsh/bash 实测都会）。串联一律用 `&&` / `||`。
+> 3. heredoc 里是**完整可跑的实现**（三段都在本机实跑验证过：配额页 / 截断下载 / 陈旧镜像三种投毒各拦一次，重跑 manifest 不累积）。它只在文件不存在时才落盘，所以**对已有仓库是空操作**——若你仓库里的 `scripts/day0_*` 是更早的版本，请照下面的内容手工同步一次（尤其是新鲜度阈值 3/21 → **35/10** 和 manifest 的 sha256 去重），别让文档和代码第二次漂移。
 
 ```bash
+# ── 0. 安装 uv（本机若已有就跳过；macOS 无 brew 也能装）──────
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+#   官方 installer 装到 ~/.local/bin。★ 只有当该目录【原先不在 PATH】时它才生成 env 脚本，
+#   所以 `source $HOME/.local/bin/env` 不能无条件写（本机实测会 127）：
+[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+export PATH="$HOME/.local/bin:$PATH"   # 幂等兜底，覆盖 installer 跳过改 PATH 的情况
+hash -r 2>/dev/null || true            # zsh/bash 刷新命令哈希
+uv --version                           # 期望 0.12.x
+
 # ── 环境（1-3）─────────────────────────────────────────────
 cd ~/PycharmProjects/LeagueProject
-uv init --python 3.11 --no-workspace                                     # 1
+#   ★ --name lolwp 是关键：不加会建出 src/leagueproject/，与 §7.2 的 src/lolwp/ 分叉。
+#     uv 0.12 的 uv init 默认就是 packaged 项目，--package 只是把意图写明。
+[ -f pyproject.toml ] || \
+  uv init --python 3.11 --no-workspace --package --name lolwp            # 1
+#   1b（可选）：uv init 会写一个 [project.scripts] lolwp = "lolwp:main"，
+#   而清空 __init__.py 后那个 main 并不存在（只影响 `uv run lolwp`，不影响 build）
+python3 - <<'PY'
+import pathlib, re
+p = pathlib.Path("pyproject.toml"); s = p.read_text()
+p.write_text(re.sub(r'\[project\.scripts\][^\[]*', '', s))
+PY
 uv add pandas numpy scikit-learn scipy pyarrow requests streamlit \
        duckdb catboost numpyro matplotlib pyyaml pydantic-settings       # 2
 uv add --dev pytest ruff mypy                                            # 3
@@ -3479,103 +3603,235 @@ uv run python -c "import pandas,sklearn,numpy;print(pandas.__version__, sklearn.
 
 # ── 目录（5-6）：§7.2 的 40 多个文件里，阶段 0 只需要这 4 个 ──
 mkdir -p data/raw docs experiments eval scripts src/lolwp tests/fixtures  # 5
-printf 'data/\nmodels/\n*.csv\n.env\n' >> .gitignore                    # 6
+for p in 'data/' 'models/' '*.csv' '.env'; do                            # 6（幂等，可重复跑）
+  grep -qxF "$p" .gitignore 2>/dev/null || printf '%s\n' "$p" >> .gitignore
+done
+#   ★ 本仓库的 .gitignore 已有这四条，还有放行 data/manifest.jsonl 等 artifact 的例外规则，
+#     所以第 6 条必须用上面的幂等写法，不能像 v1.1 那样无条件 `>>` 追加。
 #   阶段 0 只创建：experiments/preregistration.md、eval/holdout_gameids_<date>.txt、
-#   scripts/day0_discover.py、scripts/day0_validate.py。其余全部留到对应阶段。
+#   scripts/day0_discover.py、scripts/day0_fetch.sh、scripts/day0_validate.py。
 
 # ── 发现 13 个 fileId（7-8）────────────────────────────────
-cat > scripts/day0_discover.py <<'PY'                                    # 7
-import re, json, requests
+[ -f scripts/day0_discover.py ] || cat > scripts/day0_discover.py <<'PY'  # 7
+"""阶段 0：发现 OE Google Drive 文件夹里的年度 CSV 文件 ID → data/oe_files.{json,tsv}。"""
+import json, re, sys
+from datetime import date
+import requests
+
 FOLDER = "1gLSw0RLjBbtaNy0dgnGQDAZOHIgCe-HH"
-html = requests.get(f"https://drive.google.com/embeddedfolderview?id={FOLDER}#list",
-                    headers={"User-Agent": "lolwp/1.0 (qxing@uchicago.edu)"},
-                    timeout=30).text
-pat = re.compile(
-    r'id="entry-([A-Za-z0-9_-]+)".*?flip-entry-title">([^<]*).*?'
-    r'flip-entry-last-modified"><div>([^<]*)', re.S)
-out = []
-for fid, title, mod in pat.findall(html):
-    m = re.match(r'(\d{4})_LoL_esports_match_data_from_OraclesElixir\.csv', title)
-    if m:
-        out.append({"year": int(m.group(1)), "file_id": fid,
-                    "title": title, "drive_modified_raw": mod.strip()})
-out.sort(key=lambda r: r["year"])
-assert len(out) == 13, f"期望 13 个年度文件，实际 {len(out)} 个"
-json.dump(out, open("data/oe_files.json", "w"), indent=2, ensure_ascii=False)
-for r in out:
-    print(r["year"], r["file_id"], repr(r["drive_modified_raw"]))
+UA = "lolwp/1.0 (qxing@uchicago.edu)"
+NAME_RE = re.compile(r"(\d{4})_LoL_esports_match_data_from_OraclesElixir\.csv")
+
+def main() -> int:
+    html = requests.get(f"https://drive.google.com/embeddedfolderview?id={FOLDER}#list",
+                        headers={"User-Agent": UA}, timeout=30).text
+    # 分条目切分后再匹配，避免一条大正则被 HTML 结构变动整体打掉
+    entries = re.findall(r'/file/d/([\w-]+)/view.*?flip-entry-title">([^<]+)<', html, re.S)
+    out = []
+    for fid, title in entries:
+        m = NAME_RE.match(title.strip())
+        if m:
+            out.append({"year": int(m.group(1)), "file_id": fid, "title": title.strip()})
+    out.sort(key=lambda r: r["year"])
+    years = [r["year"] for r in out]
+    if not out:
+        print("FAIL: 一个年度文件都没匹配到，Drive 目录页结构可能已变", file=sys.stderr); return 1
+    if len(years) != len(set(years)):
+        print(f"FAIL: 年份重复 {years}", file=sys.stderr); return 1
+    # ★ 不硬编码 13（v1.1 写死 assert len(out) == 13，2027 年出现第 14 个文件就必炸，
+    #   而且会连带让闸 5 的新鲜度检查因为脚本起不来而整体失效）
+    if years != list(range(years[0], years[-1] + 1)):
+        print(f"FAIL: 年份不连续 {years}", file=sys.stderr); return 1
+    missing = set(range(2014, date.today().year + 1)) - set(years)
+    if missing:
+        print(f"FAIL: Drive 缺少年份 {sorted(missing)}；实得 {years}", file=sys.stderr); return 1
+    json.dump(out, open("data/oe_files.json", "w"), indent=2, ensure_ascii=False)
+    with open("data/oe_files.tsv", "w") as fh:
+        fh.writelines(f"{r['year']}\t{r['file_id']}\n" for r in out)
+    print(f"OK: {len(out)} 个年度文件，{years[0]}-{years[-1]}")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 PY
 uv run python scripts/day0_discover.py                                   # 8
 
-# ── 下载 13 个 CSV（9-10）──────────────────────────────────
-uv run python -c "
-import json
-rows = json.load(open('data/oe_files.json'))
-open('data/oe_files.tsv','w').write(
-    ''.join(f\"{r['year']}\t{r['file_id']}\n\" for r in rows))
-print(len(rows), 'files listed')
-"                                                                        # 9
-cat > scripts/day0_fetch.sh <<'SH'                                       # 10
-set -euo pipefail
+# ── 下载（9-10）────────────────────────────────────────────
+wc -l data/oe_files.tsv                                                  # 9（第 7 条已写好 tsv）
+[ -f scripts/day0_fetch.sh ] || cat > scripts/day0_fetch.sh <<'SH'       # 10
+#!/usr/bin/env bash
+# 阶段 0：下载 OE 年度 CSV。下面三条都是踩过才知道的：
+#   1. curl 从 stdin 继承会吞掉 while-read 的输入 → 必须 </dev/null，否则只下第一年
+#   2. curl -f 只拦 4xx/5xx；Drive 配额耗尽是 HTTP 200 + HTML，-f 完全不触发
+#   3. 校验必须发生在 mv 成 $OUT 【之前】：中毒文件一旦落到正式文件名，
+#      下面那条 [ -s "$OUT" ] 守卫会把"等 1h 重试"变成永久空操作
+set -uo pipefail
 UA="lolwp/1.0 (qxing@uchicago.edu)"
+RAW=data/raw; mkdir -p "$RAW"; : > data/oe_content_length.tsv
+fail=0
 while IFS=$'\t' read -r YEAR FID; do
-  OUT="data/raw/${YEAR}_LoL_esports_match_data_from_OraclesElixir.csv"
-  if [ -s "$OUT" ]; then echo "skip $YEAR"; continue; fi
+  [ -z "${YEAR:-}" ] && continue
+  OUT="$RAW/${YEAR}_LoL_esports_match_data_from_OraclesElixir.csv"
+  URL="https://drive.usercontent.google.com/download?id=${FID}&export=download&confirm=t"
+  if [ -s "$OUT" ]; then                  # 已存在就不重下，但仍要把长度记进 tsv 供第 11 条用
+    SZ=$(wc -c < "$OUT" | tr -d ' '); echo "skip  $YEAR (${SZ} bytes)"
+    printf '%s\t%s\n' "$YEAR" "$SZ" >> data/oe_content_length.tsv; continue
+  fi
   echo "fetch $YEAR ..."
-  curl -fsSL --retry 0 -A "$UA" \
-    "https://drive.usercontent.google.com/download?id=${FID}&export=download&confirm=t" \
-    -o "${OUT}.tmp"
-  mv "${OUT}.tmp" "$OUT"
+  # 先 HEAD 取 Content-Length（§3.2.1 的去重依据），下完比对，堵"中途截断"这条活口
+  #   ★ 用 tolower($1) 而不是 gawk 的 BEGIN{IGNORECASE=1} —— macOS 自带 awk 不认 IGNORECASE，
+  #     写错了 EXP 会恒为 0，闸 0b 静默失效（实测踩过）
+  EXP=$(curl -sIL -A "$UA" "$URL" </dev/null | tr -d '\r' \
+        | awk 'tolower($1)=="content-length:"{v=$2} END{print v+0}')
+  # --speed-limit/--speed-time 替代硬性 --max-time：110 MB 的 2021 在慢链路上不会被正常砍断
+  curl -sSL --speed-limit 10240 --speed-time 60 -A "$UA" "$URL" -o "${OUT}.tmp" </dev/null
+  SZ=$(wc -c < "${OUT}.tmp" 2>/dev/null | tr -d ' ' || echo 0)
+  FIRST=$(head -c 512 "${OUT}.tmp" 2>/dev/null | tr -d '[:space:]' | cut -c1)
+  if [ "$FIRST" = "<" ]; then            # 闸 0a：一切 HTML 伪装（2009B 配额页 / 2467B 病毒扫描页）
+    echo "  FAIL $YEAR: HTML 伪装页 (${SZ} bytes)，存为 .quota，不落盘"
+    mv "${OUT}.tmp" "${OUT}.quota"; fail=$((fail+1)); sleep 5; continue
+  fi
+  if [ "${EXP:-0}" -gt 0 ] && [ "$SZ" -ne "$EXP" ]; then   # 闸 0b：截断（3 MB 的半截文件能过 1MB 下界）
+    echo "  FAIL $YEAR: 截断下载 ${SZ}/${EXP} bytes，存为 .part，不落盘"
+    mv "${OUT}.tmp" "${OUT}.part"; fail=$((fail+1)); continue
+  fi
+  if [ "$SZ" -lt 1000000 ]; then         # 闸 0c：内容是 CSV 但太小 —— 与 0a 分开报，别混成一句
+    echo "  FAIL $YEAR: 内容像 CSV 但只有 ${SZ} bytes（疑似部分文件），存为 .bad，不落盘"
+    mv "${OUT}.tmp" "${OUT}.bad"; fail=$((fail+1)); continue
+  fi
+  mv "${OUT}.tmp" "$OUT"; printf '%s\t%s\n' "$YEAR" "${EXP:-$SZ}" >> data/oe_content_length.tsv
+  echo "  ok    $YEAR ${SZ} bytes"
   sleep 2
-done < data/oe_files.tsv
+done < data/oe_files.tsv                 # ★ 失败不中断：同一个配额窗口里能下成的年份要全下完
+echo "=== 完成，失败 $fail 个 ==="
+exit $fail
 SH
 bash scripts/day0_fetch.sh
-#   任一年失败（拿到 2009 字节 HTML）→ 等 1h/3h/6h 重试；连续 2 天失败才走 §3.2.2 的人工兜底
+#   任一年失败 → 等 1h / 3h / 6h 再原样重跑这一条即可。★ 坏内容永远不会落到正式文件名上
+#   （只会留下 .quota / .part / .bad），所以【不需要手动清理 data/raw】，重跑就会自动重下。
+#   连续 2 天失败才走 §3.2.2 的人工兜底。
 
 # ── 五重校验（11-12）：§3.2.3 的函数整段落成可执行脚本 ─────
-cat > scripts/day0_validate.py <<'PY'                                    # 11
-import csv, os, sys, json, hashlib
-from datetime import date, datetime, timedelta
+[ -f scripts/day0_validate.py ] || cat > scripts/day0_validate.py <<'PY'  # 11
+"""阶段 0：OE 年度 CSV 的五重校验 + manifest 登记（§3.2.3 的生产实现）。"""
+import csv, hashlib, json, os, sys
+from collections import Counter
+from datetime import date, datetime, timezone
+
+RAW, MANIFEST = "data/raw", "data/manifest.jsonl"
 EXPECTED_PREFIX = ("gameid,datacompleteness,url,league,year,split,"
                    "playoffs,date,game,patch")
+ROWS_PER_GAME = 12
+STALE_WARN_DAYS, STALE_FAIL_DAYS = 10, 35     # 3 天会被休赛期每年固定误报，理由见 §3.2.3
+csv.field_size_limit(10_000_000)
 
-def validate(path, year, prev):
-    head = open(path, 'rb').read(4096)
-    assert b'Quota exceeded' not in head, "Drive 配额错误页（HTTP 200 伪装）"
-    assert not head.lstrip().startswith(b'<'), "拿到的是 HTML 不是 CSV"
-    assert os.path.getsize(path) > 1_000_000, "文件过小"
-    first = head.decode('utf-8', 'replace').split('\n')[0]
-    assert first.startswith(EXPECTED_PREFIX), f"表头异常: {first[:80]}"
-    n_rows, games, max_date, ncol = 0, set(), '', 0
-    with open(path, newline='', encoding='utf-8', errors='replace') as f:
-        rd = csv.DictReader(f); ncol = len(rd.fieldnames)
+def sha256_of(path):          # 分块：13 份整读峰值 RSS 435 MB，分块只要 36 MB
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()      # Python 3.11+
+
+def load_prev(path):
+    """manifest 是 append-only 日志；同 year 取最后一条；容忍中断留下的半行。"""
+    prev = {}
+    if not os.path.exists(path):
+        return prev
+    for line in open(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"[warn] 跳过损坏的 manifest 行: {line[:60]}", file=sys.stderr); continue
+        prev[rec["year"]] = rec
+    return prev
+
+def validate(path, year, prev, today):
+    """返回 (rec, problems, warns)。problems 非空 => 不产出 rec，且【不改动磁盘上的文件】。"""
+    problems, warns = [], []
+    # 1 月冷启动豁免：赛季首场 1/8–1/11，累计体积 1/16–1/19 才过 1 MB [实测 2023/2025/2026]
+    bootstrap = (year == today.year and today < date(year, 2, 1))
+    size = os.path.getsize(path)
+    head = open(path, "rb").read(4096)
+    if head.lstrip()[:1] == b"<" or b"Quota exceeded" in head:     # 闸 1
+        return None, [f"闸1：拿到 HTML 不是 CSV（Drive 配额页/病毒扫描页），{size} bytes"], warns
+    if size <= (2_048 if bootstrap else 1_000_000):                # 闸 2
+        return None, [f"闸2：文件过小 {size} bytes"], warns
+    first = head.decode("utf-8", "replace").split("\n")[0].strip().lstrip("﻿")
+    if not first.startswith(EXPECTED_PREFIX):                      # 闸 3
+        return None, [f"闸3：表头前缀异常 {first[:80]!r}"], warns
+    per_game, n_rows, max_date = Counter(), 0, ""
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        rd = csv.DictReader(f); n_cols = len(rd.fieldnames or [])
         for row in rd:
-            n_rows += 1; games.add(row['gameid'])
-            if row['date'] > max_date: max_date = row['date']
-    assert len(games) > 0, "解析出 0 场比赛"
-    assert n_rows == 12 * len(games), f"非 12 行/场: {n_rows} / {len(games)}"
-    if year == date.today().year:
-        age = date.today() - datetime.strptime(max_date[:10], '%Y-%m-%d').date()
-        assert age <= timedelta(days=3), f"数据陈旧: max(date)={max_date}"
-    if prev.get('n_games'):
-        assert len(games) >= prev['n_games'] * 0.95, "场次倒退"
-    return {"year": year, "n_rows": n_rows, "n_games": len(games), "n_cols": ncol,
-            "max_date": max_date, "bytes": os.path.getsize(path),
-            "sha256": hashlib.sha256(open(path,'rb').read()).hexdigest(),
-            "fetched_at": datetime.utcnow().isoformat() + "Z"}
+            n_rows += 1
+            per_game[row["gameid"]] += 1
+            d = row.get("date") or ""
+            if d > max_date: max_date = d
+    n_games = len(per_game)
+    bad = {g: c for g, c in per_game.items() if c != ROWS_PER_GAME}         # 闸 4
+    if bad: problems.append(f"闸4：{len(bad)} 场不是 12 行/场，例 {list(bad.items())[:3]}")
+    if n_rows != ROWS_PER_GAME * n_games: problems.append(f"闸4：行数 {n_rows} != 12×{n_games}")
+    if n_games == 0 and not bootstrap: problems.append("闸4：解析出 0 场比赛")
+    # 闸 5a 单调性：历史年份镜像同样要查 → 放在 year 判断【之外】。
+    #   ★ 两边都必须 [:10]：manifest 可能存 '2026-09-18' 也可能存 '2026-09-18 11:51:26'
+    cur_d, prev_d = max_date[:10], (prev.get("max_date") or "")[:10]
+    if prev_d and cur_d and cur_d < prev_d:
+        problems.append(f"闸5a：max_date 倒退 {prev_d} -> {cur_d}")
+    if prev.get("n_games") and n_games < prev["n_games"] * 0.95:
+        problems.append(f"闸5a：场次倒退 {prev['n_games']} -> {n_games}")
+    if year == today.year and cur_d:                                       # 闸 5b
+        age = (today - date.fromisoformat(cur_d)).days
+        if age > STALE_FAIL_DAYS: problems.append(f"闸5b：数据陈旧 {age} 天（max_date={cur_d}）")
+        elif age > STALE_WARN_DAYS: warns.append(f"{age} 天未更新（休赛期属正常）")
+    if problems:
+        return None, problems, warns
+    return {"source": "oe", "year": year, "n_rows": n_rows, "n_games": n_games,
+            "n_cols": n_cols, "max_date": max_date, "bytes": size,
+            "sha256": sha256_of(path),
+            "fetched_at": datetime.now(timezone.utc).isoformat()}, [], warns
 
-prev = {}
-if os.path.exists("data/manifest.jsonl"):
-    for line in open("data/manifest.jsonl"):
-        r = json.loads(line); prev[r["year"]] = r
-with open("data/manifest.jsonl", "a") as mf:
-    for r in json.load(open("data/oe_files.json")):
-        p = f"data/raw/{r['year']}_LoL_esports_match_data_from_OraclesElixir.csv"
-        rec = validate(p, r['year'], prev.get(r['year'], {}))
-        rec["drive_modified_raw"] = r["drive_modified_raw"]
-        mf.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        print(rec["year"], rec["n_games"], "games,", rec["n_cols"], "cols, max_date",
-              rec["max_date"])
+def main():
+    today = datetime.now(timezone.utc).date()     # 与 OE 的 date 列同为 UTC，别混本地时钟
+    prev = load_prev(MANIFEST)
+    clen = {}
+    if os.path.exists("data/oe_content_length.tsv"):
+        for ln in open("data/oe_content_length.tsv"):
+            p = ln.split()
+            if len(p) == 2 and p[1].isdigit(): clen[int(p[0])] = int(p[1])
+    files = sorted(f for f in os.listdir(RAW)
+                   if f.endswith("_LoL_esports_match_data_from_OraclesElixir.csv"))
+    if not files:
+        print("FAIL: data/raw 下没有年度 CSV", file=sys.stderr); return 1
+    recs, failures = [], []
+    for fn in files:
+        year = int(fn[:4])
+        rec, problems, warns = validate(os.path.join(RAW, fn), year, prev.get(year, {}), today)
+        for w in warns: print(f"  {year}  WARN  {w}")
+        if problems:                    # ★ 不中断：13 年全跑完再统一非零退出
+            failures.append((year, problems)); continue
+        rec["content_length"] = clen.get(year, rec["bytes"])   # 验收⑤ 点名要这个字段
+        recs.append(rec)
+        print(f"  {year}  ok  {rec['n_games']:>6} 场  {rec['n_cols']} 列  "
+              f"max_date={rec['max_date'][:10]}  {rec['bytes']/1048576:6.1f} MB  {rec['sha256'][:12]}")
+    # §3.12.3 第 5 步：sha256 与上次相同 → 不落新快照；只有变化的年份才追加
+    new = [r for r in recs if prev.get(r["year"], {}).get("sha256") != r["sha256"]]
+    if new:                             # 原子落盘：中断不会留下半行 JSON，重跑不会重复累积
+        old = [l for l in open(MANIFEST).read().splitlines() if l.strip()] \
+              if os.path.exists(MANIFEST) else []
+        with open(MANIFEST + ".tmp", "w") as mf:
+            mf.write("".join(l + "\n" for l in old))
+            mf.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in new))
+        os.replace(MANIFEST + ".tmp", MANIFEST)
+    print(f"\n通过 {len(recs)}/{len(files)} 年；新落盘 {len(new)} 条，"
+          f"{len(recs) - len(new)} 条 sha256 未变（不落新快照）")
+    # ★ 失败年份既不写 manifest、也不沿用旧记录冒充本轮结果；原始文件【原地保留、不改名】
+    #   （阶段 1 验收① 要求期望路径上的旧文件还在且 sha256 不变）
+    for year, ps in failures:
+        print(f"FAIL {year}: {'; '.join(ps)}", file=sys.stderr)
+    return 1 if failures else 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 PY
 uv run python scripts/day0_validate.py                                   # 12
 
@@ -3608,30 +3864,96 @@ import pandas as pd
 d = pd.read_csv('data/raw/2026_LoL_esports_match_data_from_OraclesElixir.csv',
                 usecols=['gameid','date'])
 ids = sorted(d[d.date >= '2026-06-01'].gameid.unique())
-open('eval/holdout_gameids_20260918.txt','w').write('\n'.join(ids))
+open('eval/holdout_gameids_20260918.txt','w').write('\n'.join(ids) + '\n')
 print(len(ids), 'games in holdout window')
 "                                                                        # 16
+#   ★ 结尾那个 '\n' 不能省：不带它 wc -l 会比真实 id 数少 1，验收④「行数 >500」会数错
 #   ★ 排除机制是 loader 里的 HOLDOUT_START 日期截止线，这个文件只是成员快照（§6.1.3）
 echo "HOLDOUT_START = 2026-06-01  (UTC)" > eval/HOLDOUT_START             # 17
 
-# ── 预注册 + 提交（18-20）─────────────────────────────────
-$EDITOR experiments/preregistration.md      # 抄 §2.5 的模板                # 18
-git add .gitignore pyproject.toml uv.lock scripts/ experiments/preregistration.md \
-        eval/holdout_gameids_20260918.txt eval/HOLDOUT_START docs/PLAN.md   # 19
-git commit -m "day0: env + OE full download + 5-gate validation + preregistration + holdout freeze"   # 20
-git rev-parse HEAD   # ← 把这个 sha 抄进 preregistration.md 的头部
+# ── 预注册 + 提交（18-22）─────────────────────────────────
+#   ★ v1.1 这里写的是 `$EDITOR experiments/preregistration.md`。本机 EDITOR/VISUAL 均未设，
+#     实测连锁失效：18 → `no such file or directory` (127)，文件根本没被创建；
+#     19 → `fatal: pathspec ... did not match any files` (128，git add 是原子的，一个都没 stage)；
+#     20 → `nothing added to commit` (1)；21 → git rev-parse 安静地吐出【day0 之前】的旧 sha。
+#     最后那一步是唯一静默的，也是最坏的：预注册锚点指向一个不含预注册的 commit。
+cat > experiments/preregistration.md <<'MD'                              # 18a
+# 预注册 v1  (commit 前不得评估 holdout)
+git_sha: PENDING            # ← 第 21 条由脚本回填，勿手改这一行
+
+## Primary comparison（唯一一个）
+M_main(全特征) vs L3(side_prior + team rating + player rating)
+指标：log loss
+样本：tier-1 严格子集的 walk-forward OOS
+检验：series 级 block bootstrap + Diebold-Mariano (Harvey 修正)
+其余所有比较一律标记 exploratory，用 Benjamini-Hochberg FDR 控制。
+
+## 成功判据
+(a) walk-forward Brier ≤ 0.228 且 calibration slope ∈ [0.93, 1.07]
+(b) draft 特征组相对无 draft 基线的配对 ΔlogLoss ≥ 0.004，
+    且在 series 级聚类下 |t| > 2.5，且连续两个留出期同号
+
+## 失败判据（红线，CI 自动 fail）
+任一 fold AUC > 0.78  或  全样本 accuracy > 67%  或  log loss < 0.60
+→ 强制走完 §6.9 的八条泄漏自查清单，结论写进报告
+
+## 提前声明
+若 draft 特征不显著，我们将如实报告 α̂ ≈ 0 及其 95% CI，
+并把"BP 阶段在职业赛数据量下贡献不可测量"作为本项目的主要结论。
+这不是失败，这是结果。
+MD
+#   18b 想改就改，改完保存退出；不想改可以直接跳过这一行（上面已是一份合格的完整预注册）。
+#   ${VISUAL:-${EDITOR:-vi}} 保证两个变量都未设时退回 vi，而不是把文件名当命令执行。
+#   ★ 如果你是【整段粘贴】而不是逐行敲，请跳过这一行 —— vi 会把后面粘贴的内容当按键吃掉。
+${VISUAL:-${EDITOR:-vi}} experiments/preregistration.md                  # 18b
+
+#   18c 若你的仓库是早期用 `uv init --no-workspace`（没有 --package/--name）建出来的，
+#   它是个 virtual 项目：没有 [build-system]，`import lolwp` 会 ModuleNotFoundError，
+#   而 §7.8 的 Makefile 全靠 `python -m lolwp.*`。补齐这四样再提交：
+[ -f .python-version ] || uv python pin 3.11
+[ -f README.md ] || printf '# lolwp\n\nLoL 职业赛 BP 后胜率预测系统，详见 docs/PLAN.md。\n' > README.md
+mkdir -p src/lolwp; [ -f src/lolwp/__init__.py ] || : > src/lolwp/__init__.py
+grep -q '^\[build-system\]' pyproject.toml || cat >> pyproject.toml <<'TOML'
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+TOML
+uv sync && uv run python -c "import lolwp; print('import lolwp OK')"     # 18c
+
+#   19-20 用 && 串联，不要用 set -e（粘进交互终端时第一条失败命令会关掉你的终端）
+#   ★ .python-version / README.md / src/ 三样是 uv init 的产物，v1.1 漏 add 了：
+#     缺 src/ → 新克隆 `uv sync --frozen` 报 "Expected a Python module at src/lolwp/__init__.py"；
+#     再补上 src/ 后缺 README.md → 报 "failed to open file README.md"；
+#     缺 .python-version → 干净机器上 uv 会静默选中 3.13（requires-python=">=3.11" 放行），
+#     阶段 0 验收① 的"3.11.x"当场失守。
+git add .gitignore pyproject.toml uv.lock .python-version README.md src/ scripts/ \
+        experiments/preregistration.md eval/ docs/PLAN.md \
+  && git commit -m "day0: env + OE full download + 5-gate validation + preregistration + holdout freeze" \
+  || echo ">>> day0 提交失败，先看上面的报错，不要往下走"                # 19-20
+
+#   21 回填 sha，并【验证】回填成功 —— sed 没匹配到也返回 0，绝不能只看退出码
+SHA=$(git rev-parse HEAD)
+sed -i '' "s/^git_sha: .*/git_sha: $SHA/" experiments/preregistration.md
+grep -q "^git_sha: $SHA$" experiments/preregistration.md \
+  && git commit -am "day0: backfill preregistration git_sha" \
+  && echo ">>> OK 预注册锚点 = $SHA" \
+  || echo ">>> 回填失败：文件里没有以 'git_sha:' 开头的行，请手动写进文件头部再 commit"   # 21
+
+#   22 自检（对应 §8.1 阶段 0 验收④）
+git ls-files eval/ experiments/ | sed 's/^/committed: /'                 # 22
 ```
 
 ## 8.1 里程碑表（10 周，单人）
 
-### 阶段 0 · 第 0 周（**约半小时，照 §8.0 的 20 条命令敲**，别跳过）
+### 阶段 0 · 第 0 周（**约半小时，照 §8.0 的 22 条命令敲**，别跳过）
 
 | 项 | 内容 |
 |---|---|
 | **目标** | 环境就位 + **自动跑通一次全量下载 + 五重校验** + 冻结 holdout + 预注册 |
 | **交付** | Python 3.11 环境 + `uv.lock`；`scripts/day0_discover.py` / `day0_fetch.sh` / `day0_validate.py`；`data/raw/` 里 13 个年度 CSV（**必须含 2026**）+ `data/manifest.jsonl`；`eval/HOLDOUT_START` + `eval/holdout_gameids_<date>.txt`；`experiments/preregistration.md` 提交并记录 git sha |
-| **验收** | ① `uv run python -V` 输出 3.11.x，`import pandas,numpy,sklearn,scipy,streamlit,pyarrow,requests` 无报错<br>② 13 个文件全部通过五重校验（非 HTML / >1MB / 表头前缀 / `rows == 12×n_games` 且 `n_games>0` / **当年文件 `max(date)` 距今 ≤3 天 + 同年 `n_games` 不低于上次快照的 95%**）<br>③ **2026 文件的 `max(date)` 距今 ≤3 天**（v1.0 的"场次 ≥5,439"作废——那个参照来自已冻结的 `oe.datalisk.io`，见 §3.2.3）<br>④ `eval/HOLDOUT_START` 已 commit，且 `holdout_gameids_<date>.txt` 行数 >500（**注意它只是成员快照，排除机制是 loader 里的日期截止线，§6.1.3**）<br>⑤ `manifest.jsonl` 13 条各有 `sha256` / `content_length` / `n_games` / `n_cols` / `max_date` / `fetched_at`<br>⑥ 跑完 §8.0 的第 13–15 条：记录下今天各年的**列数 / 是否含 firstPick / league code 全集 / blue-first-pick 比例**，作为 §0 纪律要求的基线快照 |
-| **退路** | 直连当天失败（拿到 2009 字节 HTML）→ 1h/3h/6h 退避重试；**连续 2 天失败**才走 §3.2.2 的人工兜底（浏览器 Make-a-copy）或联系 Tim Sevenhuysen / 订阅 Patreon。若最终只拿到 2014–2025（冻结年份，陈旧无害），可先做前 6 周开发，**但必须在 Tab 3 显著标注"2026 数据缺失"，所有超参网格结论标记为 provisional**，绝不在缺 2026 的情况下宣布任何半衰期结论。 |
+| **验收** | ① `uv run python -V` 输出 3.11.x（**`.python-version` 必须已进版本库**——缺了它干净机器上 uv 会静默选 3.13，这条当场失守），`import pandas,numpy,sklearn,scipy,streamlit,pyarrow,requests` 无报错；且**新克隆一份跑 `uv sync --frozen` 能成功**（需 `src/` + `README.md` 一并提交）<br>② 13 个文件全部通过五重校验（非 HTML / >1MB / 表头前缀 / `rows == 12×n_games` 且每场恰好 12 行 且 `n_games>0` / **闸 5a：`max_date` 不倒退 + 同年 `n_games` 不低于上次快照 95%；闸 5b：当年文件 `max(date)` 距今 ≤35 天（>10 天告警）**，阈值理由见 §3.2.3）<br>③ **2026 文件的 `max(date)` 距今 ≤35 天且当日 `day0_validate.py` 退出码为 0**（v1.0 的"场次 ≥5,439"作废——那个参照来自已冻结的 `oe.datalisk.io`，见 §3.2.3）<br>④ `eval/HOLDOUT_START` 已 commit，且 `holdout_gameids_<date>.txt` 行数 >500（**注意它只是成员快照，排除机制是 loader 里的日期截止线，§6.1.3**）；第 22 条自检能列出 `eval/` 与 `experiments/` 下的文件<br>⑤ `manifest.jsonl` **覆盖 13 个年份、每年最新一条**含 `sha256` / `content_length` / `n_games` / `n_cols` / `max_date` / `fetched_at`（**措辞不能写成"13 条"**——manifest 是 §3.12.1 定义的 append-only 累积日志，重跑与后续每日 ingest 都会加行，"恰好 13 条"与阶段 1 验收③ 永远互相矛盾）<br>⑥ 跑完 §8.0 的第 13–15 条：记录下今天各年的**列数 / 是否含 firstPick / league code 全集 / blue-first-pick 比例**，作为 §0 纪律要求的基线快照 |
+| **退路** | 直连当天失败（拿到 2009 字节 HTML）→ 1h/3h/6h 退避重试；**连续 2 天失败**才走 §3.2.2 的人工兜底（浏览器 Make-a-copy，只需一个免费 Google 账号）或联系 Tim Sevenhuysen（OE Discord `#oe-data-updates`）。**不要为了拿数据去订阅 Patreon**——它不解锁任何数据、不提高任何配额（§7.11）。若最终只拿到 2014–2025（冻结年份，陈旧无害），可先做前 6 周开发，**但必须在 Tab 3 显著标注"2026 数据缺失"，所有超参网格结论标记为 provisional**，绝不在缺 2026 的情况下宣布任何半衰期结论。 |
 
 ### 阶段 1 · 第 1 周
 
@@ -3639,7 +3961,7 @@ git rev-parse HEAD   # ← 把这个 sha 抄进 preregistration.md 的头部
 |---|---|
 | **目标** | 数据层做稳：发现 → 下载 → 五重校验 → 原子替换 → bronze |
 | **交付** | `ingest/oracles_elixir.py`（含四级降级链与五重校验）、`ingest/ddragon.py`、`store/bronze.py`、`store/audit_columns.py`、`scripts/daily.sh` + crontab |
-| **验收** | ① **注入一个 2009 字节的 quota HTML 作为 mock 下载响应，ingest 必须保留旧文件并 `exit 1`，且旧文件 sha256 不变**（写成 pytest）<br>② 注入一个"内容合法但陈旧"的 2026 镜像（**`date` 只到 2026-03 的陈旧快照**），**闸 5 的日期闸必须拦下它**；再注入一个"场次比上次快照少 20%"的截断文件，**单调不减闸必须拦下**（v1.0 那条"8,040 场 vs manifest 更高值"的用例作废，方向是反的）<br>③ 连跑 7 天 crontab：当年文件**每天都下载**；2014–2025 至少一天全部命中"Content-Length 未变 → 跳过下载"；且当年文件 sha256 未变的那天**不落新快照**<br>④ `audit_columns.py` 报告至少检出：2026 的 40 个 league code 全部在 `LEAGUE_CANON` 里（未登记则 CI 红）、**各年 `firstPick` 的列存在性与 blue 先手比例**（2025≈100% / 2026≈70.2%）、`atakhans` 2026 恒 0<br>⑤ 173 个英雄三体系往返映射单测 100% 通过 |
+| **验收** | ① **注入一个 2009 字节的 quota HTML 作为 mock 下载响应，ingest 必须保留旧文件并 `exit 1`，且旧文件 sha256 不变**（写成 pytest）。⚠️ 顺序只能是 **`.tmp` → 校验 → 再 replace**（§3.2.2 的 daily.sh 范式、§8.0 第 10 条）；**写反成"先 mv 再校验"就会同时违反本条和 §8.0**——v1.1 的 day0_fetch.sh 正是这么写的，结果 `exit 0` 且坏文件落到正式文件名上<br>② 注入一个"内容合法但陈旧"的 2026 镜像（**`date` 只到 2026-03 的陈旧快照**），**闸 5 的日期闸必须拦下它**；再注入一个"场次比上次快照少 20%"的截断文件，**单调不减闸必须拦下**（v1.0 那条"8,040 场 vs manifest 更高值"的用例作废，方向是反的）<br>③ 连跑 7 天 crontab：当年文件**每天都下载**；2014–2025 至少一天全部命中"Content-Length 未变 → 跳过下载"；且当年文件 sha256 未变的那天**不落新快照**<br>④ `audit_columns.py` 报告至少检出：2026 的 40 个 league code 全部在 `LEAGUE_CANON` 里（未登记则 CI 红）、**各年 `firstPick` 的列存在性与 blue 先手比例**（2025≈100% / 2026≈70.2%）、`atakhans` 2026 恒 0<br>⑤ 173 个英雄三体系往返映射单测 100% 通过 |
 | **退路** | Drive 配额连续多日不恢复 → 切"周更 + 手动上传"模式，Streamlit 侧栏 `st.file_uploader` 作为一等公民而非兜底；模型对 1–2 天数据延迟极不敏感（老队伍 Elo 一天动不了 5 分），这个降级的实际代价接近 0。 |
 
 ### 阶段 2 · 第 2 周
@@ -3803,7 +4125,10 @@ Faker · Azir    23 胜 9 负（原始 71.9%） → 收缩后 61%  ⓘ 样本量
 
 对线金币层面的迁移强度："每 +100G 的 SQ counter 在职业约对应 **+40G**"，即约 **4 折**。
 
-**但代价很高**：这条路要么自采 solo queue（Riot dev key 24h 失效 + 100 req/2min，采 50 万场是多周独立工程 + production key 审批不可控），要么爬第三方聚合站（lolalytics/u.gg/op.gg 实测全部 403，ToS 不明）。**所以 v1 不做，放 v2 backlog。**
+**但代价很高**：这条路要么自采 solo queue，要么爬第三方聚合站（lolalytics/u.gg/op.gg 实测全部 403，ToS 不明）。
+自采的真实门槛（**v1.2 更正，v1.1 这里把两种 key 混为一谈了**）：只需一个**免费 Riot 账号** + 在 Developer Portal 注册一个 **personal product**（**无审批**即得，不像 development key 那样 24 小时失效，也**不需要 production key**——那个才要 working prototype + 约 2 周审批，且只有公开部署才用得上）。**真正的阻塞是吞吐不是审批**：100 req/2min = 50 req/min，50 万场约 **167 小时**连续采集，外加 league-v4/match-v5 的 ID 发现工程。
+⚠️ 若将来真要申 production key：Riot General Policies 原文禁止 "Products cannot create alternatives for official skill ranking systems such as the ranked ladder. Prohibited alternatives include MMR or ELO calculators"——**本项目的 team/player rating 展示方式需要规避这一条**。
+**所以 v1 不做，放 v2 backlog。**
 
 **v1 的替代**：用低秩 embedding 的 `lane_counter` 项，embedding 从职业赛数据预训练（严格前置期），过两折门禁才启用。
 
@@ -3966,8 +4291,8 @@ OE 与 lolesports 是两套完全独立的 ID 体系。这个链路断了，模�
 | **OE Google Drive 文件夹** | https://drive.google.com/drive/folders/1gLSw0RLjBbtaNy0dgnGQDAZOHIgCe-HH | **唯一官方渠道** |
 | OE 列名释义 | https://oracleselixir.com/definitions | |
 | OE 数据字典 | https://lol.timsevenhuysen.com/matchdata/match-data-dictionary/ | 滞后，无 pick1-5 / datacompleteness |
-| OE Discord（schema 变更通知） | https://discord.gg/GsauAGAr6 | 订阅 `oe-data-updates` |
-| OE Patreon | https://www.patreon.com/oracleselixir | 建议支持 |
+| OE Discord（schema 变更通知） | https://discord.gg/x54QyZ2VCa | 订阅 `oe-data-updates`，需免费 Discord 账号。⚠️ OE 官网正文里的 `discord.gg/GsauAGAr6` **已失效（404）**，别照抄 |
+| OE Patreon | https://www.patreon.com/oracleselixir | **纯自愿赞助，不解锁任何数据、不提高任何下载配额**（官方原文：数据 "provided free of charge"；权益是幻想联赛推荐 / Discord 角色 / 独家内容） |
 | lolesports API 社区文档 | https://github.com/vickz84259/lolesports-api-docs | openapi.yaml 3,183 行 |
 | lolesports API 文档站 | https://vickz84259.github.io/lolesports-api-docs/ | |
 | Data Dragon versions | https://ddragon.leagueoflegends.com/api/versions.json | |
@@ -4017,7 +4342,7 @@ OE 与 lolesports 是两套完全独立的 ID 体系。这个链路断了，模�
 | # | 坑 | 症状 | 防御 |
 |---|---|---|---|
 | 1 | **Drive 配额页伪装成 HTTP 200** | 2009 字节 HTML 覆盖整年 CSV，`csv.DictReader` 解析成 0 行不抛异常 | 五重校验（§3.2.3）；**注意 `0 % 12 == 0` 会放行** |
-| 2 | **陈旧镜像通过全部内容校验** | 3 月的快照让时间衰减权重压在过期 meta 上 | 闸 5 单侧：`max(date)` 距今 ≤3 天 + 同年 `n_games` 不低于上次快照 95%。**绝不用 `oe.datalisk.io`（它自己已冻结）** |
+| 2 | **陈旧镜像通过全部内容校验** | 3 月的快照让时间衰减权重压在过期 meta 上 | 闸 5a 单调性（`max_date` 不倒退 + 同年 `n_games` 不低于上次快照 95%，**历史年份同样生效**）+ 闸 5b 绝对陈旧度（当年文件 >35 天硬失败 / >10 天告警；3 天会被休赛期每年固定误报，§3.2.3）。**绝不用 `oe.datalisk.io`（它自己已冻结）** |
 | 2b | **新鲜度参照系本身过期** | 每天拒收最新鲜的正确数据，pipeline 开箱即死 | 参照系只能是"数据自身的日期"和"我们自己上次的快照"，不能是第三方接口 |
 | 3 | `df[df.datacompleteness=='complete']` | 2022 年删掉整个 LPL | 整场判定：`groupby('gameid').filter(...)`（§3.2.5） |
 | 3b | **在 12 行长表上 `dropna(subset=[...])`** | 产出"只有 4 个选手的一方"，`/5` 的分母算错，模型照样输出一个数（2026 实测 675 场） | 先聚合判定完整性、整场保留或整场丢弃 + silver 写出前的长度断言 |
