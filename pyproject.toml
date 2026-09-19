@@ -1,0 +1,26 @@
+[project]
+name = "lolwp"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "catboost>=1.2.10",
+    "duckdb>=1.5.5",
+    "matplotlib>=3.11.2",
+    "numpy>=2.4.6",
+    "numpyro>=0.22.0",
+    "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.17.1",
+    "streamlit>=1.64.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]

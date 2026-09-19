@@ -1,0 +1,35 @@
+# 评测口径：tier-1 赛区集合（2026 版）
+# 依据：docs/PLAN.md §9.5「赛区」。此文件与 HOLDOUT_START 一样属于预注册内容，
+# 冻结后不得为了指标好看而改动；确需改动必须在 experiments/ 下新开一版并说明理由。
+#
+# 注意赛区 code 在 2025/2026 之间发生过改名又改回（实测）：
+#   2025: LTA N / LTA S / LTA 存在，LCS / CBLOL 不存在
+#   2026: LCS / CBLOL 存在，LTA* 全部不存在
+# 因此跨年取数必须同时收这两组，由 canonical 映射统一。
+
+tier1_2026:
+  - LPL
+  - LCK
+  - LEC
+  - LCS
+  - LCP
+  - CBLOL
+  - PCS
+  - VCS
+
+tier1_2025_aliases:   # 与上面是同一批实体的旧 code
+  - LTA N            # ← 2025 年的 LCS
+  - LTA S            # ← 2025 年的 CBLOL
+  - LTA
+
+international:
+  - MSI
+  - WLDS
+  - FST              # First Stand
+  - EWC              # Esports World Cup
+  - IC               # Intel Extreme / 国际邀请类
+
+# 训宽评窄：训练可用全部赛区（多约 3 倍样本，对选手与英雄主效应有帮助），
+# 但所有对外报告的指标只在 tier1 + international 上计算。见 PLAN.md §6.8。
+eval_scope: tier1 + international
+train_scope: all
