@@ -22,3 +22,8 @@ __pycache__/
 
 # os / ide
 .DS_Store
+
+# 例外：这三个是可复现性 artifact，体积极小，必须进版本库
+!data/manifest.jsonl
+!data/oe_files.json
+!data/oe_files.tsv
