@@ -1,35 +1,72 @@
-# 评测口径：tier-1 赛区集合（2026 版）
-# 依据：docs/PLAN.md §9.5「赛区」。此文件与 HOLDOUT_START 一样属于预注册内容，
-# 冻结后不得为了指标好看而改动；确需改动必须在 experiments/ 下新开一版并说明理由。
+# 评测口径：tier-1 赛区集合
 #
-# 注意赛区 code 在 2025/2026 之间发生过改名又改回（实测）：
-#   2025: LTA N / LTA S / LTA 存在，LCS / CBLOL 不存在
-#   2026: LCS / CBLOL 存在，LTA* 全部不存在
-# 因此跨年取数必须同时收这两组，由 canonical 映射统一。
+# 版本 v2（2026-09-19 修订）。v1 见 eval/tier1_leagues.v1.yaml 与 git 历史。
+# 修订理由与合法性见 experiments/preregistration.md 的「修订记录 A1」。
+# 关键前提：修订时尚无任何模型被训练、尚无任何 holdout 评估被执行（已在 A1 中留证）。
+#
+# 赛区 code 在历史上多次改名，且方向来回。全部以实测的队伍集合重叠度验证：
+#   2018 NA LCS → 2019 LCS      重叠 10/10
+#   2018 EU LCS → 2019 LEC      重叠  6/10
+#   2015 OGN    → 2016 LCK      重叠  7/13
+#   2020 OPL    → 2021 LCO      重叠  7/8
+#   2024 LCS    → 2025 LTA N    → 2026 LCS      重叠 7/8
+#   2024 CBLOL  → 2025 LTA S    → 2026 CBLOL    重叠 7/8
+# 跨年取数必须同时收所有别名，由 configs/league_canonical.yaml 统一到 canonical。
 
-tier1_2026:
+tier1_current:          # 2026 在役的一线赛区
   - LPL
   - LCK
   - LEC
   - LCS
   - LCP
   - CBLOL
-  - PCS
-  - VCS
+  - PCS               # 见下方 open_questions.pcs_vcs_relegation
+  - VCS               # 同上
 
-tier1_2025_aliases:   # 与上面是同一批实体的旧 code
-  - LTA N            # ← 2025 年的 LCS
-  - LTA S            # ← 2025 年的 CBLOL
+tier1_aliases:          # 与上面是同一批实体的历史 code
+  - LTA N             # 2025 年的 LCS
+  - LTA S             # 2025 年的 CBLOL
   - LTA
+  - NA LCS            # 2018 及以前的 LCS
+  - EU LCS            # 2018 及以前的 LEC
+  - OGN               # 2015 年的 LCK
+
+tier1_defunct:          # 已停办的历史一线赛区，最后一场 2024-08-24，对 holdout 零影响
+  - LMS
+  - OPL
+  - LCO
+  - LCL
+  - LLA
+  - LLN
+  - CLS
+  - GPL
 
 international:
+  - WLDs              # ⚠ 小写 s。v1 误写为 WLDS，直接导致漏收世界赛，见修订记录 A1
   - MSI
-  - WLDS
-  - FST              # First Stand
-  - EWC              # Esports World Cup
-  - IC               # Intel Extreme / 国际邀请类
+  - FST               # First Stand
+  - EWC               # Esports World Cup
+  - IEM
+  - IWCI
+  - MSC
+  - ASI
 
-# 训宽评窄：训练可用全部赛区（多约 3 倍样本，对选手与英雄主效应有帮助），
-# 但所有对外报告的指标只在 tier1 + international 上计算。见 PLAN.md §6.8。
-eval_scope: tier1 + international
-train_scope: all
+# v1 曾把 IC 列入 international。实测 IC = Iberian Cup，参赛队是西班牙 LVP SL
+# 与葡萄牙 LPLOL 的二级/青训队（Barça eSports / BISONS ECLUB / UCAM 等），
+# 共 244 场，2022-10-17 ~ 2025-11-22。属 tier 0，已移除。
+excluded_after_review:
+  IC: "Iberian Cup，西葡二级队跨国杯赛，非国际一线赛事"
+  LAS: "LCK Academy Series，韩国青训，非拉美赛区"
+
+eval_scope: tier1_current + tier1_aliases + tier1_defunct + international
+train_scope: all        # 训宽评窄，见 PLAN.md §6.8
+
+open_questions:
+  pcs_vcs_relegation: >
+    实测 PCS 2020-2024 每年有 2-3 支队伍进世界赛，2025 与 2026 为零，
+    2025 起阵容变成 CFO Academy / PSG Talon Academy 等青训队；VCS 同理，
+    GAM 与 Team Secret Whales 已转入 LCP。按「该年有无队伍出现在 WLDs/MSI」
+    的客观判据，两者 2025 起应降为 tier 0。
+    影响：holdout 窗口内 PCS 53 场 + VCS 37 场，合计 90 场。
+    这是口径判断而非事实错误，**保留 v1 的 tier 1 不变，等使用者决定**。
+    若要改，必须在任何 holdout 评估之前，并同样记进修订记录。
