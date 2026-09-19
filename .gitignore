@@ -1,0 +1,24 @@
+# data & model artifacts (never commit: OE CSVs are ~70-100MB each)
+data/
+models/
+reports/
+*.csv
+*.parquet
+*.zst
+*.joblib
+*.onnx
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# env
+.env
+.env.*
+
+# os / ide
+.DS_Store
