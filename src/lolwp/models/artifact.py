@@ -11,7 +11,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 ARTIFACT_DIR = "models"
@@ -56,7 +55,7 @@ class Artifact:
         os.replace(tmp, path)
 
     @staticmethod
-    def load(path: str) -> "Artifact":
+    def load(path: str) -> Artifact:
         with open(path) as fh:
             d = json.load(fh)
         return Artifact(**d)

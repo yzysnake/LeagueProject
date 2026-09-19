@@ -14,11 +14,47 @@ import numpy as np
 import pandas as pd
 
 
-def icc_oneway(values: np.ndarray, groups: np.ndarray) -> dict[str, float]:
-    """单因素随机效应 ICC(1)，用方差分量法。
+def pairwise_rho(values: np.ndarray, groups: np.ndarray) -> dict[str, float]:
+    """组内相关的稳健估计：只用**多元素组内部的真实配对**。
 
-    values 通常是两个模型的 per-game log loss 之差 d_i，
-    groups 是 series_id。ICC 高 = 同一系列内的 d_i 高度相关 = 有效样本少。
+    为什么需要它（2026-09-19 实测）：
+    ANOVA 版 ICC(1) 在「单元素组的方差与多元素组不同」时会严重高估。
+    本项目的 OOS 里 **48.8% 的 series 是单局**，且单局的 var(d) 是多局的 **2.04 倍**
+    （0.013124 vs 0.006421）。单局组只进组间平方和、不进组内平方和，
+    于是这个异方差被整段记到"组间"头上。
+
+    反证（真 ρ = 0，只把单局组的方差放大）：
+        ×1.0 → icc_oneway 报 0.0051   ×1.5 → 0.2301
+        ×2.04 → 0.4454                ×3.0 → 0.6788
+
+    实测对照：L2→L3 的 icc_oneway = 0.3120，而本函数给 **0.0266**。
+    阶段 3 报告里那个 0.3120 主要是伪影，已在 reports/stage3_power_and_icc.md 更正。
+    """
+    df = pd.DataFrame({"v": np.asarray(values, dtype=float), "g": groups}).dropna()
+    mu, sd = df.v.mean(), df.v.std()
+    if sd == 0:
+        return {"rho": 0.0, "n_pairs": 0}
+    num = cnt = 0.0
+    for _, s in df.groupby("g"):
+        v = s.v.to_numpy()
+        k = len(v)
+        if k < 2:
+            continue
+        c = v - mu
+        # Σ_{i<j} c_i c_j = ((Σc)² − Σc²) / 2
+        num += (c.sum() ** 2 - (c**2).sum()) / 2.0
+        cnt += k * (k - 1) / 2.0
+    if cnt == 0:
+        return {"rho": 0.0, "n_pairs": 0}
+    return {"rho": float(num / cnt / sd**2), "n_pairs": int(cnt)}
+
+
+def icc_oneway(values: np.ndarray, groups: np.ndarray) -> dict[str, float]:
+    """单因素随机效应 ICC(1)，方差分量法。
+
+    ⚠️ **在单元素组与多元素组存在异方差时会严重高估**，本项目正是这种情况。
+    判定 MDE 时请用 paired_power() 返回的 rho（稳健版），
+    本函数保留是为了与文献口径对照，以及暴露失真程度。
     """
     df = pd.DataFrame({"v": np.asarray(values, dtype=float), "g": groups})
     df = df.dropna()
@@ -65,9 +101,11 @@ def paired_power(
     """给一组配对差（per-game log loss 之差），返回完整的功效画像。"""
     d = np.asarray(d, dtype=float)
     stats = icc_oneway(d, groups)
+    rob = pairwise_rho(d, groups)
     sigma = float(np.std(d, ddof=1))
     n = len(d)
-    deff = design_effect(stats["m_bar"], stats["icc"])
+    # 用稳健的 ρ 算 deff；ANOVA 版一并返回以便发现失真
+    deff = design_effect(stats["m_bar"], rob["rho"])
     n_eff = n / deff
     mean = float(np.mean(d))
     return {
@@ -76,7 +114,10 @@ def paired_power(
         "n_games": n,
         "n_series": stats["n_groups"],
         "m_bar": stats["m_bar"],
-        "icc": stats["icc"],
+        "icc": rob["rho"],
+        "icc_anova": stats["icc"],
+        "icc_distortion": stats["icc"] - rob["rho"],
+        "n_pairs": rob["n_pairs"],
         "deff": deff,
         "n_eff": n_eff,
         "t_naive": mean / (sigma / np.sqrt(n)) if sigma else float("nan"),
@@ -88,8 +129,11 @@ def paired_power(
 
 def footer(p: dict[str, float]) -> str:
     """每张表脚都要打印这一行（阶段 3 验收⑤）。"""
+    warn = ""
+    if abs(p.get("icc_distortion", 0.0)) > 0.05:
+        warn = f"  ⚠ANOVA版={p['icc_anova']:.4f}(失真{p['icc_distortion']:+.4f})"
     return (
         f"n_games={p['n_games']:,}  n_series={p['n_series']:,}  m̄={p['m_bar']:.3f}  "
-        f"ICC={p['icc']:.4f}  deff={p['deff']:.3f}  n_eff={p['n_eff']:,.0f}  "
-        f"σ_d={p['sigma_d']:.4f}  MDE={p['mde']:.5f}"
+        f"ρ={p['icc']:.4f}  deff={p['deff']:.3f}  n_eff={p['n_eff']:,.0f}  "
+        f"σ_d={p['sigma_d']:.4f}  MDE={p['mde']:.5f}{warn}"
     )

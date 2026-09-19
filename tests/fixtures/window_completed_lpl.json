@@ -1,0 +1,223 @@
+{
+ "esportsGameId": "115616219464541906",
+ "esportsMatchId": "115616219464541901",
+ "gameMetadata": {
+  "patchVersion": "16.10.776.5552",
+  "blueTeamMetadata": {
+   "esportsTeamId": "99566404853058754",
+   "participantMetadata": [
+    {
+     "participantId": 1,
+     "esportsPlayerId": "108477153941144313",
+     "summonerName": "WBGZika",
+     "championId": "Ambessa",
+     "role": "top"
+    },
+    {
+     "participantId": 2,
+     "esportsPlayerId": "102191852281361066",
+     "summonerName": "WBGJiejie",
+     "championId": "Sylas",
+     "role": "jungle"
+    },
+    {
+     "participantId": 3,
+     "esportsPlayerId": "98767975914916595",
+     "summonerName": "WBGXiaohu",
+     "championId": "Malphite",
+     "role": "mid"
+    },
+    {
+     "participantId": 4,
+     "esportsPlayerId": "106368692529261498",
+     "summonerName": "WBGElk",
+     "championId": "Kalista",
+     "role": "bottom"
+    },
+    {
+     "participantId": 5,
+     "esportsPlayerId": "116532530847108247",
+     "summonerName": "WBGTheHank",
+     "championId": "Renata",
+     "role": "support"
+    }
+   ]
+  },
+  "redTeamMetadata": {
+   "esportsTeamId": "99566404846951820",
+   "participantMetadata": [
+    {
+     "participantId": 6,
+     "esportsPlayerId": "105705431649727017",
+     "summonerName": "LGDBurdol",
+     "championId": "Zaahen",
+     "role": "top"
+    },
+    {
+     "participantId": 7,
+     "esportsPlayerId": "109784703569533478",
+     "summonerName": "LGDHeng",
+     "championId": "Maokai",
+     "role": "jungle"
+    },
+    {
+     "participantId": 8,
+     "esportsPlayerId": "109784590066548371",
+     "summonerName": "LGDTangyuan",
+     "championId": "Vayne",
+     "role": "mid"
+    },
+    {
+     "participantId": 9,
+     "esportsPlayerId": "111726434869930501",
+     "summonerName": "LGDShaoye",
+     "championId": "Draven",
+     "role": "bottom"
+    },
+    {
+     "participantId": 10,
+     "esportsPlayerId": "113662612771288963",
+     "summonerName": "LGDYcx",
+     "championId": "Thresh",
+     "role": "support"
+    }
+   ]
+  }
+ },
+ "frames": [
+  {
+   "rfc460Timestamp": "2026-05-24T14:58:07.236Z",
+   "gameState": "in_game",
+   "blueTeam": {
+    "totalGold": 0,
+    "inhibitors": 0,
+    "towers": 0,
+    "barons": 0,
+    "totalKills": 0,
+    "dragons": [],
+    "participants": [
+     {
+      "participantId": 1,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 2,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 3,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 4,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 5,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     }
+    ]
+   },
+   "redTeam": {
+    "totalGold": 0,
+    "inhibitors": 0,
+    "towers": 0,
+    "barons": 0,
+    "totalKills": 0,
+    "dragons": [],
+    "participants": [
+     {
+      "participantId": 6,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 7,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 8,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 9,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     },
+     {
+      "participantId": 10,
+      "totalGold": 0,
+      "level": 1,
+      "kills": 0,
+      "deaths": 0,
+      "assists": 0,
+      "creepScore": 0,
+      "currentHealth": 0,
+      "maxHealth": 0
+     }
+    ]
+   }
+  }
+ ]
+}
