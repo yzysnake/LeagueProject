@@ -72,5 +72,6 @@ def test_no_fuzzy_fallback_in_primary(primary):
                     reason="需要覆盖率报告")
 def test_stage2_acceptance_tier1_coverage():
     """阶段 2 验收⑤：tier-1 + 国际赛的选手行覆盖率 ≥ 95%。实测 99.44%。"""
-    txt = open("data/crosswalk/coverage_report.md").read()
+    with open("data/crosswalk/coverage_report.md") as fh:
+        txt = fh.read()
     assert "tier-1 + 国际赛" in txt
