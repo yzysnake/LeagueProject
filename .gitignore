@@ -1,7 +1,7 @@
 # data & model artifacts (never commit: OE CSVs are ~70-100MB each)
-data/
-models/
-reports/
+/data/
+/models/
+/reports/
 *.csv
 *.parquet
 *.zst
