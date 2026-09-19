@@ -22,7 +22,7 @@ def main() -> int:
     ).text
 
     # 分条目切分后再匹配，避免一条大正则被 HTML 结构变动整体打掉
-    entries = re.findall(r'/file/d/([\w-]+)/view.*?flip-entry-title">([^<]+)<', html, re.S)
+    entries = re.findall(r'/file/d/([\w-]+)/view.*?flip-entry-title">([^<]+)<', html, re.DOTALL)
     out = []
     for fid, title in entries:
         m = NAME_RE.match(title.strip())
