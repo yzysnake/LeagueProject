@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """阶段 0：Oracle's Elixir 年度 CSV 的五重校验 + manifest 登记。
 
 相对手册 v1.1 的修正（均有实测依据，见 docs/PLAN.md §3.2.3）：
@@ -46,12 +47,13 @@ def load_prev(path: str) -> dict[int, dict]:
     """manifest 是 append-only 日志；同一 year 取最后一条。"""
     prev: dict[int, dict] = {}
     if os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            prev[rec["year"]] = rec
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                prev[rec["year"]] = rec
     return prev
 
 

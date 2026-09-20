@@ -13,10 +13,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-import numpy as np
 import pandas as pd
 
-from lolwp.features.draft_priors import ROLES, draft_features_from_state
+from lolwp.features.draft_priors import draft_features_from_state
 from lolwp.features.priors import features_from_state
 from lolwp.models.artifact import LAYER_OF, Artifact
 

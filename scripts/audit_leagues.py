@@ -265,7 +265,8 @@ def _read_frozen_eval_codes() -> set[str]:
     path = os.path.join(REPO, "eval", "tier1_leagues.yaml")
     try:
         import yaml  # 只在审计时需要，silver 侧不依赖
-        d = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        with open(path, encoding="utf-8") as fh:
+            d = yaml.safe_load(fh) or {}
     except Exception as exc:  # noqa: BLE001 - 读不到就降级，不让审计脚本崩
         log.warning("读不到/解析不了 %s（%s），跳过冻结口径对比", path, exc)
         return set()

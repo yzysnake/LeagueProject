@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """阶段 0：发现 Oracle's Elixir Google Drive 文件夹里的年度 CSV 文件 ID。
 
 输出 data/oe_files.json，供 day0_fetch.sh 使用。

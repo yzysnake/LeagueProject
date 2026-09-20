@@ -204,7 +204,7 @@ def stage_windows(limit: int | None, rate: float, workers: int) -> None:
             return {**base, "status": f"error:{type(exc).__name__}"}
         try:
             ps = parse_window_metadata(payload)
-        except Exception as exc:  # 结构异常五花八门，绝不能让一局炸掉整批
+        except Exception as exc:  # noqa: BLE001 - 结构异常五花八门，绝不能让一局炸掉整批
             return {**base, "status": f"bad_metadata:{type(exc).__name__}:{exc}"}
         return {
             **base,
@@ -266,7 +266,8 @@ def _load_oe(years: list[str]):
 def _champ_to_dd_id() -> dict[str, str]:
     """OE 展示名 -> DDragon id。§3.4 实测两边零失配，所以不做任何 fuzzy。"""
     p = os.path.join(REPO, "data", "ddragon", "champion_map.json")
-    m = json.load(open(p))
+    with open(p) as fh:
+        m = json.load(fh)
     return {c["name"]: c["dd_id"] for c in m["champions"]}
 
 
@@ -703,7 +704,8 @@ def _tier1_codes() -> set[str]:
     """
     import yaml
 
-    y = yaml.safe_load(open(os.path.join(REPO, "eval", "tier1_leagues.yaml")))
+    with open(os.path.join(REPO, "eval", "tier1_leagues.yaml")) as fh:
+        y = yaml.safe_load(fh)
     out: set[str] = set()
     for k in ("tier1_2026", "tier1_2025_aliases", "international"):
         out |= {str(v).strip() for v in (y.get(k) or [])}
