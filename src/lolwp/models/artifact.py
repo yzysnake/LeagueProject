@@ -14,13 +14,21 @@ from typing import Any
 import pandas as pd
 
 ARTIFACT_DIR = "models"
-# 产品模型 = L4。L5 的 mastery_diff 在全部 ICC 假设下都低于 MDE（阶段 4 报告），
-# 故不进主力；但 mastery 仍然算出来给 UI 展示（§4.3.3）。
-PROD_FEATURES = ["side_prior", "team_elo_diff", "player_elo_diff", "champ_meta_diff"]
+# 产品模型 = BT4_LR（阶段 8 对比表：7 个候选里无一在 MDE 之上胜出）。
+#   · 分层 BT 的选手潜变量取代了 team_elo / player_elo——阶段 8 消融实测，
+#     有了 bt_player 之后拿掉那两列毫无影响（−0.00004 / −0.00016，均低于 MDE），
+#     所以生产模型直接不带它们，省一遍状态机。
+#   · L5 的 mastery_diff 在全部 ICC 假设下都低于 MDE，不进主力，
+#     但仍算出来给 UI 展示（§4.3.3）。
+#   · 协同/克制已在阶段 7 被证伪（ΔLL −0.00042），不进。
+PROD_FEATURES = [
+    "side_prior", "bt_player_diff", "bt_chem_diff", "bt_league_diff", "champ_meta_diff",
+]
 LAYER_OF = {
     "side_prior": "赛况",
-    "team_elo_diff": "实力",
-    "player_elo_diff": "实力",
+    "bt_player_diff": "实力",
+    "bt_chem_diff": "实力",
+    "bt_league_diff": "实力",
     "champ_meta_diff": "阵容",
 }
 
@@ -33,6 +41,7 @@ class Artifact:
     sigma: dict[str, float]
     prior_state: dict[str, Any]
     draft_state: dict[str, Any]
+    bt_state: dict[str, Any] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -48,7 +57,7 @@ class Artifact:
                     "coef": self.coef, "intercept": self.intercept,
                     "mu": self.mu, "sigma": self.sigma,
                     "prior_state": self.prior_state, "draft_state": self.draft_state,
-                    "meta": self.meta,
+                    "bt_state": self.bt_state, "meta": self.meta,
                 },
                 fh,
             )
@@ -67,11 +76,18 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json") -> Artifact:
     from lolwp.features.draft_priors import run_draft_state_machine
     from lolwp.features.loader import load_dev
     from lolwp.features.priors import run_state_machine
+    from lolwp.models.bt_cache import rolling_ratings_cached
+    from lolwp.models.hier_bt import HierBTConfig
 
     full = load_dev()
     f1, st1 = run_state_machine(full, return_state=True)
     f2, st2 = run_draft_state_machine(full, return_state=True)
-    feats = pd.concat([f1, f2], axis=1)
+    cfg_bt = HierBTConfig(refit_every_days=3)
+    fbt = rolling_ratings_cached(full, cfg_bt)
+    feats = pd.concat([f1, f2, fbt], axis=1)
+    # 推理用的最终快照：只吃训练截止时刻之前的比赛
+    from lolwp.models.hier_bt import fit_snapshot
+    bt_snap = fit_snapshot(full, full.kickoff_utc.max() + pd.Timedelta(seconds=1), cfg_bt)
 
     # 训宽评窄：拟合只用 tier>=1（同质池子），状态机跑全赛区
     m = full.league_tier >= 1
@@ -88,14 +104,19 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json") -> Artifact:
         sigma=dict(zip(PROD_FEATURES, sd.tolist())),
         prior_state=st1,
         draft_state=st2,
+        # 训练截止时刻的 BT 快照。推理走 HierBTSnapshot.features()——
+        # 与训练**同一个函数**，这是 §7.4 防 train-serve skew 的关键。
+        bt_state=bt_snap.to_dict(),
         meta={
-            "model": "L4",
+            "model": "BT4_LR",
             "trained_on": str(full.kickoff_utc.max()),
             "n_train_games": int(m.sum()),
             "n_state_games": len(full),
             "holdout_start": str(full.attrs.get("holdout_start")),
-            "oos_log_loss": 0.6307,
-            "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场（见 reports/stage4_baseline_ladder.md）",
+            "oos_log_loss": 0.61917,
+            "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场（reports/stage8_comparison.md）",
+            "holdout_log_loss": 0.61653,
+            "holdout_note": "final holdout 989 场，一次性揭盲于 git 437d1cb（reports/final_technical_report.md §7）",
         },
     )
     art.save(out)

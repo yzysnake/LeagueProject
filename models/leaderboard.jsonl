@@ -1,0 +1,3 @@
+{"champion": "BT4_LR", "challenger": "退化·常数基准率", "promote": false, "delta_ll": -0.0723855344028711, "t": -30.257522723137978, "mde": 0.006698482826323708}
+{"champion": "BT4_LR", "challenger": "退化·rating 加噪", "promote": false, "delta_ll": -0.016053034372368075, "t": -12.386619661434564, "mde": 0.0036287944145549774}
+{"champion": "BT4_LR", "challenger": "对照·现役自己", "promote": false, "delta_ll": 0.0, "t": NaN, "mde": 0.0}

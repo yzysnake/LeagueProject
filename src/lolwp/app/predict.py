@@ -18,6 +18,7 @@ import pandas as pd
 from lolwp.features.draft_priors import draft_features_from_state
 from lolwp.features.priors import features_from_state
 from lolwp.models.artifact import LAYER_OF, Artifact
+from lolwp.models.hier_bt import HierBTSnapshot
 
 
 @dataclass
@@ -56,6 +57,14 @@ def build_features(art: Artifact, d: Draft) -> tuple[dict[str, float], list[str]
         blue_player_ids=d.blue_player_ids,
         red_player_ids=d.red_player_ids,
     )
+    # 分层 BT 特征：走 HierBTSnapshot.features()，与训练**同一个函数**（§7.4）
+    if art.bt_state:
+        snap = HierBTSnapshot.from_dict(art.bt_state)
+        f.update(snap.features(
+            blue_team_id=str(d.blue_team_id), red_team_id=str(d.red_team_id),
+            blue_player_ids=[str(p) if p else None for p in d.blue_player_ids],
+            red_player_ids=[str(p) if p else None for p in d.red_player_ids],
+        ))
     f.update(
         draft_features_from_state(
             art.draft_state,

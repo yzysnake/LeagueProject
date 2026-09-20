@@ -55,12 +55,31 @@ def _icon(dd_id: str, version: str) -> str | None:
     return p if os.path.exists(p) else None
 
 
+# 极端段的实测校准（样本外 23,060 场，reports/stage8_comparison.md）。
+# 模型在高概率端系统性过度自信，必须在 UI 上诚实表达（§5.6.4）。
+_EXTREME_BUCKETS = [
+    (0.95, 94, 0.9685, 0.9255),
+    (0.90, 308, 0.9363, 0.9286),
+    (0.85, 750, 0.8993, 0.8880),
+]
+
+
 def _prob_bar(p: float, warns: list[str]) -> None:
     c1, c2 = st.columns([3, 1])
     with c1:
         st.progress(p, text=f"蓝方胜率 {p:.1%}　｜　红方 {1 - p:.1%}")
     with c2:
         st.metric("蓝方胜率", f"{p:.1%}")
+    hi = max(p, 1 - p)
+    for lo, n, mean_pred, actual in _EXTREME_BUCKETS:
+        if hi >= lo:
+            st.info(
+                f"这个概率落在模型的高自信段。历史上模型给出 ≥{lo:.0%} 的 {n} 场比赛里，"
+                f"平均预测 {mean_pred:.1%} 而**实际胜率只有 {actual:.1%}**——"
+                f"高自信段是系统性过度自信的，请按 {actual:.0%} 左右理解。",
+                icon="📉",
+            )
+            break
     for w in warns:
         st.warning(w, icon="⚠️")
 

@@ -305,6 +305,14 @@ class HierBTSnapshot:
         d["cfg"] = asdict(self.cfg)
         return d
 
+    @staticmethod
+    def from_dict(d: dict[str, Any]) -> HierBTSnapshot:
+        """从 artifact 里重建快照。推理侧用它 + features() 复用训练的同一套公式。"""
+        d = dict(d)
+        d["as_of"] = pd.Timestamp(d["as_of"])
+        d["cfg"] = HierBTConfig(**d["cfg"])
+        return HierBTSnapshot(**d)
+
 
 FEATURE_COLUMNS = (
     "bt_player_diff",
