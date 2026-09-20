@@ -47,6 +47,27 @@ make app        # 启动本地站点
 
 其余命令：`make test` / `make lint` / `make gate` / `make monitor` / `make reproduce`。
 
+### 前后端拆分部署
+
+```bash
+make api          # 只起 FastAPI（127.0.0.1:8000，单 worker）
+make up           # docker compose：api + web，**纯离线即可用**
+make up-online    # 额外起每日拉数与实时轮询
+```
+
+七个端点：`/health` `/champions` `/players` `/predict` `/predict/batch`
+`/explain` `/live`。实测单次 `/predict` 中位 **0.5 ms**（p99 0.7 ms），
+`/predict/batch` 遍历 173 个英雄 3 ms。
+
+三条写进 compose 的硬约束：
+
+- **`--workers 1`**：artifact 含状态快照（2,070 队 / 10,863 选手 /
+  113,058 条选手英雄计数），每 worker 一份，多 worker 内存线性翻倍。
+  横向扩要加容器实例，不是加 worker。
+- **只绑 `127.0.0.1`**：不对外暴露。
+- **`profiles: ["online"]`**：让「离线降级」成为默认状态，
+  而不是一条需要额外实现和测试的路径。
+
 **可选**（不影响主链路）：注册免费 Fandom 账号可用 Leaguepedia 补充源；
 加入 OE Discord 可获知 schema 变更预警。详见 `docs/PLAN.md` §7.11。
 

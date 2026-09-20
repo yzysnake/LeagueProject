@@ -23,6 +23,9 @@ from lolwp.models.artifact import Artifact
 
 ART = "models/prod.json"
 CMAP = "data/ddragon/champion_map.json"
+# 设了 LOLWP_API 就走 HTTP（docker compose 的 web 容器），否则进程内直算。
+# 两条路径**共用 app.predict 的同一套函数**，不会 skew。
+API_BASE = os.environ.get("LOLWP_API", "").rstrip("/")
 SILVER = "data/silver/games.parquet"
 ROLE_CN = {"top": "上单", "jng": "打野", "mid": "中单", "bot": "ADC", "sup": "辅助"}
 
@@ -30,6 +33,17 @@ ROLE_CN = {"top": "上单", "jng": "打野", "mid": "中单", "bot": "ADC", "sup
 @st.cache_resource
 def _art() -> Artifact:
     return Artifact.load(ART)
+
+
+def _api_alive() -> bool:
+    """API 可达才走 HTTP；不可达自动退回进程内直算，不让用户看到 500。"""
+    if not API_BASE:
+        return False
+    try:
+        import requests
+        return requests.get(f"{API_BASE}/health", timeout=3).status_code == 200
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @st.cache_resource
@@ -320,8 +334,9 @@ def main() -> None:
     st.set_page_config(page_title="LoL 职业赛胜率预测", layout="wide")
     st.title("英雄联盟职业比赛胜率预测")
     art, champs, games = _art(), _champs(), _games()
+    mode = "经 API" if _api_alive() else "进程内"
     st.caption(
-        f"模型 {art.meta['model']}　｜　训练至 {art.meta['trained_on'][:10]}　｜　"
+        f"推理 {mode}　｜　模型 {art.meta['model']}　｜　训练至 {art.meta['trained_on'][:10]}　｜　"
         f"{art.meta['n_train_games']:,} 场　｜　walk-forward OOS log loss {art.meta['oos_log_loss']}"
         f"　｜　英雄数据 Data Dragon {champs['version']}"
     )

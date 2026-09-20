@@ -47,6 +47,22 @@ def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-z))
 
 
+_SNAP_CACHE: dict[int, HierBTSnapshot] = {}
+
+
+def _bt_snapshot(art: Artifact) -> HierBTSnapshot:
+    """按 artifact 对象缓存重建后的快照。
+
+    from_dict 要把上万条 rating 反序列化，每次 /predict 都做一遍会让
+    单次调用从 3 ms 涨到 200 ms。artifact 在进程生命周期里不变，缓存安全。
+    """
+    k = id(art)
+    if k not in _SNAP_CACHE:
+        _SNAP_CACHE.clear()          # 只保留当前 artifact，换模型时自动失效
+        _SNAP_CACHE[k] = HierBTSnapshot.from_dict(art.bt_state)
+    return _SNAP_CACHE[k]
+
+
 def build_features(art: Artifact, d: Draft) -> tuple[dict[str, float], list[str]]:
     warns: list[str] = []
     f = features_from_state(
@@ -59,7 +75,7 @@ def build_features(art: Artifact, d: Draft) -> tuple[dict[str, float], list[str]
     )
     # 分层 BT 特征：走 HierBTSnapshot.features()，与训练**同一个函数**（§7.4）
     if art.bt_state:
-        snap = HierBTSnapshot.from_dict(art.bt_state)
+        snap = _bt_snapshot(art)
         f.update(snap.features(
             blue_team_id=str(d.blue_team_id), red_team_id=str(d.red_team_id),
             blue_player_ids=[str(p) if p else None for p in d.blue_player_ids],

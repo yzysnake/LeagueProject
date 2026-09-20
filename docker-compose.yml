@@ -1,0 +1,75 @@
+# 本地部署（PLAN.md §7.8）。
+#
+#   docker compose up                     纯离线：api + web。手动摆阵容完全可用。
+#   docker compose --profile online up    额外起实时轮询。
+#
+# `profiles: ["online"]` 这一行的意义：让「离线降级」成为**默认状态**，
+# 而不是一条需要额外实现和测试的路径。
+
+x-uv: &uv
+  image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+  working_dir: /app
+  environment:
+    PYTHONPATH: /app/src
+    UV_PROJECT_ENVIRONMENT: /app/.venv-docker   # 不与宿主机的 .venv 冲突
+
+services:
+  api:
+    <<: *uv
+    # ★ 必须 --workers 1：artifact 含状态快照（2,070 队 / 10,863 选手 /
+    #   113,058 条选手英雄计数），每个 worker 一份，多 worker 内存线性翻倍。
+    #   要横向扩就加容器实例，不是加 worker。
+    command: >
+      sh -c "uv sync --frozen --no-dev &&
+             uv run uvicorn lolwp.api.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    volumes:
+      - ./src:/app/src:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+    ports: ["127.0.0.1:8000:8000"]     # ★ 只绑本地回环，不对外暴露
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)\""]
+      # ★ 冷启动要 uv sync + 载入 10 MB artifact 并重建快照。
+      #   有先例把 start_period 设成 90 s 导致重启死循环。
+      start_period: 300s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    <<: *uv
+    command: >
+      sh -c "uv sync --frozen --no-dev &&
+             uv run streamlit run src/lolwp/app/main.py
+               --server.address 0.0.0.0 --server.port 8501 --server.headless true"
+    environment:
+      PYTHONPATH: /app/src
+      UV_PROJECT_ENVIRONMENT: /app/.venv-docker
+      LOLWP_API: http://api:8000        # 有它就走 API，没有就进程内直算
+    volumes:
+      - ./src:/app/src:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+      - ./frontend:/app/frontend:ro
+    ports: ["127.0.0.1:8501:8501"]
+    depends_on:
+      api: {condition: service_healthy}
+
+  scheduler:
+    <<: *uv
+    profiles: ["online"]                # ★ docker compose up 默认不起它
+    command: >
+      sh -c "uv sync --frozen --no-dev &&
+             uv run python -m lolwp.live.scheduler"
+    volumes:
+      - ./src:/app/src:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./data:/app/data                 # 可写：增量拉取新数据
+      - ./models:/app/models
+    depends_on:
+      api: {condition: service_healthy}

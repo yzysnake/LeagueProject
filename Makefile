@@ -29,8 +29,17 @@ icons:          ## 下载 173 张英雄图标供离线使用
 artifact:       ## 训练生产模型 BT4_LR 并打包（约 40 分钟，BT 需全量拟合）
 	$(PY) -m lolwp.models.artifact
 
-app:            ## 启动本地站点（离线可用）
+app:            ## 启动本地站点（离线可用，进程内推理）
 	PYTHONPATH=src .venv/bin/streamlit run src/lolwp/app/main.py
+
+api:            ## 启动 FastAPI（单 worker：artifact 每 worker 一份）
+	PYTHONPATH=src .venv/bin/uvicorn lolwp.api.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+up:             ## docker compose：api + web，纯离线可用
+	docker compose up
+
+up-online:      ## docker compose + 每日拉数与实时轮询
+	docker compose --profile online up
 
 test:           ## 跑全部测试
 	$(PY) -m pytest tests/ -q
