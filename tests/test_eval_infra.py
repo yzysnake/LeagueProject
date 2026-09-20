@@ -165,14 +165,34 @@ def test_train_always_precedes_valid(dev):
 
 @pytest.mark.skipif(not os.path.exists("data/preds_ladder.parquet"), reason="需先跑基线")
 def test_no_red_line_tripped():
-    """accuracy > 67% 或 log loss < 0.60 或任一 fold AUC > 0.78 → 几乎必有泄漏。"""
+    """红线（预注册修订 A3 后）：accuracy > 67% / log loss < 0.60 / **合并** AUC > 0.78。
+
+    A3 把原来的「任一 fold AUC > 0.78」换掉了，因为它是坏的：
+    90 折里 8 折不足 50 场、最小的只有 3 场；纯随机预测下最大 fold AUC 的
+    中位数就是 1.0000，超过 0.78 的概率 63%。即便限制到 n≥200，
+    一个合并 AUC 0.7148 的健康模型仍有 38.4% 概率触发。
+    一条 38% 时间在报警的告警器等于没有告警器。
+    """
     from lolwp.eval.metrics import evaluate
     preds = pd.read_parquet("data/preds_ladder.parquet")
     for name, s in preds.groupby("model"):
         e = evaluate(s.y.to_numpy(), s.p.to_numpy())
         assert e["accuracy"] <= 0.67, f"{name} accuracy {e['accuracy']:.4f} 触及红线"
         assert e["log_loss"] >= 0.60, f"{name} log loss {e['log_loss']:.4f} 触及红线"
-        assert e["auc"] <= 0.78, f"{name} AUC {e['auc']:.4f} 触及红线"
+        assert e["auc"] <= 0.78, f"{name} 合并 AUC {e['auc']:.4f} 触及红线"
+
+
+def test_per_fold_auc_red_line_would_false_alarm():
+    """锁住 A3 的依据：旧判据在小折上必然误报。若这条失败，说明切分变了，
+    A3 的论证需要重做。"""
+    from lolwp.eval.walkforward import WFConfig, make_folds
+    from lolwp.features.loader import load_dev
+    if not os.path.exists(SILVER):
+        pytest.skip("需先跑 silver.build()")
+    d = load_dev(min_tier=1, since="2019-01-01").reset_index(drop=True)
+    sizes = np.array([f.n_valid for f in make_folds(d, WFConfig())])
+    assert sizes.min() < 50, "最小折已不再是小折，A3 的第一条论证需重新验证"
+    assert (sizes < 200).sum() > 10, "小折数量大幅下降，A3 的论证需重新验证"
 
 
 @pytest.mark.skipif(not os.path.exists("data/preds_ladder.parquet"), reason="需先跑基线")

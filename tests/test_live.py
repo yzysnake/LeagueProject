@@ -121,7 +121,7 @@ def load_fixture(name: str) -> dict:
 # A. 四种 HTTP 状态各一条（验收⑤第一条）
 # ════════════════════════════════════════════════════════════════════════
 def test_window_200_returns_ready_with_payload():
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     c, _ = make_client({"/window/": FakeResponse(200, payload)})
     r = c.window("115548681803406328")
     assert r.state is FeedState.READY
@@ -223,7 +223,7 @@ def test_champion_map_is_a_bijection_on_feed_ids():
 def test_resolver_parses_live_fixture_all_ten_players():
     """真实进行中的比赛：10 名选手 / 2 支队伍 / 10 个英雄全部解析成功。"""
     r = Resolver.load()
-    rg = r.resolve_window(load_fixture("window_live.json"), feed_league_name="LEC")
+    rg = r.resolve_window(load_fixture("window_live_lec_g1.json"), feed_league_name="LEC")
     assert rg.stats["n_players_resolved"] == 10
     assert rg.stats["n_champs_resolved"] == 10
     assert rg.stats["n_teams_resolved"] == 2
@@ -241,7 +241,7 @@ def test_live_fixture_side_comes_from_window_not_schedule():
     而 window 说 blue=KC(111692118851466302)。两边是反的。
     """
     r = Resolver.load()
-    rg = r.resolve_window(load_fixture("window_live.json"), feed_league_name="LEC")
+    rg = r.resolve_window(load_fixture("window_live_lec_g1.json"), feed_league_name="LEC")
     assert rg.blue.esports_team_id == "111692118851466302"  # KC
     assert rg.red.esports_team_id == "103461966965149786"   # MKOI
 
@@ -298,7 +298,7 @@ def test_unknown_entities_degrade_and_warn_but_never_raise():
 @needs_data
 def test_unknown_league_falls_into_unknown_bucket():
     r = Resolver.load()
-    rg = r.resolve_window(load_fixture("window_live.json"), feed_league_name="Totally New League")
+    rg = r.resolve_window(load_fixture("window_live_lec_g1.json"), feed_league_name="Totally New League")
     assert rg.league_canon == "UNKNOWN"
     assert any("UNKNOWN" in w for w in rg.warnings)
 
@@ -422,7 +422,7 @@ def test_to_draft_uses_sentinels_for_unknown_entities():
     art = Artifact.load(ARTIFACT)
     install_fallback_ratings(art.prior_state, load_dev())
     r = Resolver.load()
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     payload["gameMetadata"]["blueTeamMetadata"]["esportsTeamId"] = "0"
     rg = r.resolve_window(payload, feed_league_name="LEC")
     d = to_draft(rg, art.prior_state)
@@ -501,7 +501,7 @@ def test_poller_skips_completed_games():
 
 def test_poller_204_to_200_transition_produces_prediction():
     """唯一权威触发器：204 → 200 跳变。"""
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     state = {"n": 0}
 
     def window(url):
@@ -542,7 +542,7 @@ def test_poller_marks_no_coverage_after_15_minutes_of_204():
 
 def test_poller_is_idempotent_on_repeated_200():
     """同一局同一份阵容只预测一次（§7.7.1 的 predicted_cache）。"""
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     routes = _live_event("m1", ["g1"])
     routes["/window/"] = FakeResponse(200, payload)
     p, _, clk = make_poller(routes)
@@ -557,7 +557,7 @@ def test_poller_is_idempotent_on_repeated_200():
 
 def test_meta_hash_ignores_frames():
     """幂等键只哈希 gameMetadata：frames 每帧都变，算进去等于没有幂等。"""
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     other = json.loads(json.dumps(payload))
     other["frames"] = [{"rfc460Timestamp": "different"}]
     assert _meta_hash(payload) == _meta_hash(other)
@@ -595,7 +595,7 @@ def test_poller_survives_resolver_exception():
             raise RuntimeError("解析炸了")
 
     routes = _live_event("m1", ["g1"])
-    routes["/window/"] = FakeResponse(200, load_fixture("window_live.json"))
+    routes["/window/"] = FakeResponse(200, load_fixture("window_live_lec_g1.json"))
     c, _ = make_client(routes)
     p = Poller(c, Boom(), None, now=Clock(), sleep=lambda _: None)
     p.tick_live(force=True)
@@ -659,7 +659,7 @@ def test_poller_config_rejects_impolite_intervals():
 
 def test_parse_rosters_returns_feed_native_ids():
     """lolesports.parse_rosters 给的是 feed 原生 id，转换由 resolve 做，不能搞混。"""
-    r = parse_rosters(load_fixture("window_live.json"))
+    r = parse_rosters(load_fixture("window_live_lec_g1.json"))
     assert r["patch"] == "16.17.810.4348"
     assert r["blue_champ_ids"][0] == "Gragas"      # 字符串 id，不是数字 key
     assert r["blue_roles"] == ["top", "jungle", "mid", "bottom", "support"]
@@ -677,7 +677,7 @@ def test_no_coverage_still_recovers_if_the_game_finally_starts():
     比验收⑥的 15 分钟阈值还长。前端该在 15 分钟停转圈（验收⑥），
     但后台永久放弃就会漏掉手册自己那个样本。
     """
-    payload = load_fixture("window_live.json")
+    payload = load_fixture("window_live_lec_g1.json")
     started = {"yes": False}
 
     def window(url):
