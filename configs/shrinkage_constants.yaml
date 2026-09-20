@@ -1,0 +1,140 @@
+_generated_by: lolwp.models.variance_components
+_discipline: k 属于 PLAN §4.1「每个 fold 必须重估」那一类。本文件给的是默认值/报告口径；生产里逐 fold 调用 moment_variance_components(train_slice)
+  重估。
+_units: sigma_* 为胜率单位；k = 0.25 / sigma^2
+meta:
+  dataset: data/silver/games.parquet
+  filter: 'load_dev(min_tier=1, since=''2019-01-01'')  # holdout 物理排除'
+  holdout_start: '2026-06-01 00:00:00+00:00'
+  n_games_loaded: 23702
+  n_games_modelled: 23596
+  n_player: 2029
+  n_team: 240
+  n_region: 14
+  n_champion: 171
+  n_player_champion_cells: 35615
+  svi:
+    guide: AutoNormal
+    optimizer: Adam(lr=0.02)
+    steps: 30000
+    seeds:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    wall_seconds_total: 190.0
+moment:
+  team:
+    sigma_winrate: 0.104742
+    ci95:
+    - 0.094013
+    - 0.115561
+    k: 22.8
+    n_units: 241
+    n_obs: 47404
+    median_obs_per_unit: 105.0
+  player:
+    sigma_winrate: 0.105002
+    ci95:
+    - 0.100671
+    - 0.10909
+    k: 22.7
+    n_units: 2034
+    n_obs: 236923
+    median_obs_per_unit: 48.0
+  champion:
+    sigma_winrate: 0.017972
+    ci95:
+    - 0.014487
+    - 0.020712
+    k: 774.1
+    n_units: 171
+    n_obs: 237020
+    median_obs_per_unit: 976.0
+  champion:position:
+    sigma_winrate: 0.019267
+    ci95:
+    - 0.015649
+    - 0.022376
+    k: 673.4
+    n_units: 520
+    n_obs: 237020
+    median_obs_per_unit: 48.5
+  player:champion:
+    sigma_winrate: 0.0
+    ci95:
+    - 0.0
+    - 0.018991
+    k: null
+    n_units: 35719
+    n_obs: 236923
+    median_obs_per_unit: 3.0
+svi_logit:
+  player:
+    sigma_logit_median: 0.2006
+    ci95_logit:
+    - 0.18767
+    - 0.212868
+    entity_sigma_winrate: 0.05015
+    entity_ci95_winrate:
+    - 0.046918
+    - 0.053217
+    side_logit_sd: 0.448555
+    k_from_svi: 99.4
+  team:
+    sigma_logit_median: 0.061098
+    ci95_logit:
+    - 0.055607
+    - 0.066335
+    entity_sigma_winrate: 0.076373
+    entity_ci95_winrate:
+    - 0.069509
+    - 0.082919
+    side_logit_sd: 0.305491
+    k_from_svi: 42.9
+  champion:
+    sigma_logit_median: 0.071922
+    ci95_logit:
+    - 0.063272
+    - 0.081482
+    entity_sigma_winrate: 0.017981
+    entity_ci95_winrate:
+    - 0.015818
+    - 0.02037
+    side_logit_sd: 0.160823
+    k_from_svi: 773.3
+  player:champion:
+    sigma_logit_median: 0.006644
+    ci95_logit:
+    - 0.002951
+    - 0.016184
+    entity_sigma_winrate: 0.001661
+    entity_ci95_winrate:
+    - 0.000738
+    - 0.004046
+    side_logit_sd: 0.014856
+    k_from_svi: 90621.9
+k:
+  team: 23
+  player: 23
+  champion: 774
+  champion:position: 673
+  player:champion: null
+  player_within_team: 99
+svi_only:
+  player_within_team:
+    sigma_logit_median: 0.2006
+    ci95_logit:
+    - 0.18767
+    - 0.212868
+    sigma_winrate: 0.05015
+    k: 99.4
+    _note: 矩估计测不到这一层；只有分层模型能把队伍与选手分开
+crosscheck_team_marginal:
+  svi_implied_sigma_winrate: 0.135518
+  svi_ci95:
+  - 0.128358
+  - 0.142784
+  moment_sigma_winrate: 0.104742
+  ratio_svi_over_moment: 1.294

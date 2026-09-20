@@ -101,7 +101,12 @@ def run_draft_state_machine(
             tw, tn = cs_all.read(("__POS__", pos), now)
             theta_bar[pos] = _logit(tw / tn) if tn > 0 else 0.0
 
-        k1 = 476.0  # §4.3 实测标定值；阶段 7 再用矩估计逐 fold 重算
+        # k₁ 由阶段 6 的方差成分定标给出（configs/shrinkage_constants.yaml）。
+        # 手册的 476 无来源；本数据的矩估计与 SVI 两条独立路线给出：
+        #   champion 层         k = 774.1 / 773.3（差 0.05%）
+        #   champion:position 层 k = 673.4   ← 本模块用的是 (英雄,位置) 组合键，取这个
+        # 收缩比手册强 41%，what-if 单次换英雄的 Δp 会相应缩小。
+        k1 = 673.0
 
         sides = {}
         for side in ("blue", "red"):
@@ -183,7 +188,7 @@ def run_draft_state_machine(
         "champ_t1": champ,
         "pos_base_logit": pos_base,
         "mastery": mast,
-        "k1": 476.0,
+        "k1": 673.0,
         "hl_champ_days": HL_CHAMP_DAYS,
         "hl_mastery_days": HL_MASTERY_DAYS,
         "as_of": str(now),

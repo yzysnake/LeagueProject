@@ -13,16 +13,19 @@
 
 模型形式（与 §4.6.2b 一致，但把"队伍层"显式写进层次结构）
 --------------------------------------------------------
-    logit P(blue win) = b0 + [Σ_{p∈blue} r_p − Σ_{p∈red} r_p] + [c_Tblue − c_Tred]
+    logit P(blue win) = b0 + [S_blue − S_red] + [c_Tblue − c_Tred]
+    S_side            = Σ_{p∈side 已知名单} r_p + (5 − |已知名单|)·m_{T(side)}
 
     r_p  ~ N(m_{T(p)}, σ_p²)     选手效应收缩到其所属队伍
     m_T  ~ N(ℓ_{g(T)}, σ_T²)     队伍效应收缩到其所属赛区
     ℓ_g  ~ N(0, σ_L²)            赛区效应收缩到全局
     c_T  ~ N(0, σ_c²)            chemistry 残差：team ≠ Σplayer 的那一部分
 
-注意 `m_T` 只出现在**先验**里、不出现在似然里，`c_T` 只出现在**似然**里。
-这样拆开是为了避开"5 个 r_p 同时 +δ" 与 "c_T +5δ" 的共线性：
+注意 `m_T` 对**名单完整的 96.4% 的比赛**只出现在先验里、不出现在似然里，
+`c_T` 则只出现在似然里。这样拆开是为了避开"5 个 r_p 同时 +δ" 与 "c_T +5δ" 的共线性：
 队伍层的**水平**由 m_T 承担（纯收缩目标），队伍层的**残差**由 c_T 承担（带紧先验）。
+剩下 3.6% 名单不全的比赛（silver 实测：某一侧只有 0-4 个非空 playerid）
+把缺位按 m_T 计价，理由见 `_build_design`。
 
 `ℓ_g`（= 手册的 `L_region`）只可能被**跨赛区对战**识别出来：同区内战里
 ℓ 在两边同时出现、在 logit 里直接抵消。本模块实测的桥接量见 `bridge_census()`。
@@ -40,20 +43,29 @@ team strength 在本模块里是 `Σ(5 个 r_p) + c_T`，正是手册 §9.4 写�
 红线 3 要管的是"依赖**训练段**全局分布的统计量"——它的危险在于：同一个统计量
 对 fold A 是合法的、对 fold B 就偷看了未来。本模块的产物不是这种东西：
 `fit_snapshot(df, as_of)` **只吃 kickoff < as_of 的比赛**，
-`rolling_ratings()` 沿一条固定日历网格（默认 14 天）依次做快照，
+`rolling_ratings()` 沿一条固定日历网格（默认 3 天）依次做快照，
 每一场比赛取**严格早于它自己开赛时刻**的最近一张快照。
 于是「任何一行的特征都只用了该行开赛前的信息」这条性质是**逐行成立**的，
 与 fold 划分无关——这正是 Elo/Glicko 拿到豁免的那条理由，
-只不过本模块把"每场一次的在线更新"换成了"每 14 天一次的批量重解"。
-`tests/test_hier_bt.py::test_future_deletion_invariance` 用未来删除不变性把这条性质钉死：
-删掉 T 之后的所有比赛重跑，T 之前的每一张快照 **bit-identical**（§4.7.1 T2 档 A）。
+只不过本模块把"每场一次的在线更新"换成了"每 3 天一次的批量重解"。
+
+`tests/test_hier_bt.py` 里三条测试把这条性质钉死，**全部要求 bit-identical**（§4.7.1 T2 档 A，
+比手册给 BT/SVI 的档 B 严一档；MAP 是确定性的，本来就不该退到档 B）：
+  * `test_future_deletion_invariance_snapshot` / `_rolling`：删掉 T 之后的全部比赛重跑，T 之前逐位相同；
+  * `test_future_label_perturbation_invariance`：只把 T 之后的**胜负翻转**，T 之前逐位相同
+    （删除可能被"窗口下界跟着动"掩盖，翻转不会）；
+  * `test_refit_is_bit_identical_across_runs`：同输入两次运行逐位相同。
+真实数据上另跑过一次同样的未来删除检查（cut=2021-07-01，7,685 行非零特征，
+6 列全部 maxabs_diff=0.0；另有一张 31,454 场的快照 r_player 最大差 0.0）。
 
 **为什么不照手册字面的"每个 origin 在训练段内拟合一次"**：那样只能给 valid 段
 造出 as-of 特征，train 段的特征要么没有、要么得用"拟合时已经看过这些比赛结果"的
 同一张 rating 表。后者是典型的 in-sample plug-in 偏差——主力 logistic 会学到一个
 被高估的 β_player，到了 valid 段（真·as-of rating）就系统性过度自信。
 滚动网格严格支配它：train / valid 两段的特征口径**完全一致**，且成本更低
-（网格点数 ≈ 时间跨度/14 天，远少于 90 个 origin × 每 origin 一次全量拟合）。
+（网格点数 ≈ 时间跨度/3 天；单次拟合在 3 万场规模上约 1 秒，全库 1,096 个网格点）。
+而且网格比 origin 密得多（3 天 vs 4 周），valid 段拿到的 rating 反而**更新鲜**——
+这正是实测里最值钱的一项：调参段上把网格从 28 天收到 3 天，log loss 从 0.632941 掉到 0.628324。
 
 实现选择
 --------
@@ -75,6 +87,19 @@ import scipy.sparse as sp
 from scipy.optimize import minimize
 
 UNKNOWN_REGION = "UNKNOWN"
+ROSTER_SIZE = 5
+
+
+def _pad_roster(ids: Sequence[str | None]) -> list[str | None]:
+    """把一侧名单补齐到 5 人：缺位填 `None`（取值时会落到队伍层 m_T）。
+
+    只补不截——真出现 6 个 id 说明上游折叠出了错，那是 silver 的问题，
+    在这里悄悄截掉反而会把它藏起来。
+    """
+    out = list(ids)
+    if len(out) < ROSTER_SIZE:
+        out.extend([None] * (ROSTER_SIZE - len(out)))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -84,18 +109,32 @@ UNKNOWN_REGION = "UNKNOWN"
 class HierBTConfig:
     """超参。σ 的量纲全部是 **log-odds**，与手册 §9.4 的"选手层真实效应 SD"同尺度。
 
-    `sigma_player=0.1294` 是手册实测的 PLAYER 层效应 SD（k≈14）。这里把它当默认值，
-    而不是当"最优值"——真正的取值由 `scripts` 里的调参跑在 **2019 年之前**的
-    独立时间段上选出来（评测口径是 2019 起，两段不重叠），避免在验收口径上调参。
+    **这些默认值是在 2016-01-01 ~ 2019-01-01 这一段上选出来的**（43 组配置，
+    walk-forward 口径与验收段逐字一致，OOS 9,145 场 / L3=0.639869）。
+    验收口径是 **2019 起**，两段不重叠 —— 没有在验收数据上调过任何一个数。
+
+    手册 §9.4 给的先验 `sigma_player=0.1294`（PLAYER 层效应 SD，k≈14）**被实测否掉了**：
+    在调参段上 0.1294 给 BT_repl=0.634362，放宽到 0.25 给 0.633418；
+    `sigma_team` 从 §9.4 的 0.1330 放宽到 0.70 更是从 0.634362 直接跳到 0.631186。
+    原因是手册那两个 SD 描述的是"**真实效应**的离散度"，而这里的 σ 是**先验宽度**；
+    MAP 收缩本身就会把估计压向中心，再按真实 SD 设先验等于收缩了两次。
+    实测最优的先验宽度约为真实效应 SD 的 2 倍（player）到 5 倍（team），这符合预期。
+
+    `sigma_chem` / `sigma_league` 在调参段上几乎无差别（0.628324 / 0.628399 / 0.628317
+    / 0.628711 对应 σ_L=0.3,0.6,0.6(σ_c=.15),1.0，跨度 <4e-4，小于任何 MDE），
+    因此保留手册给的紧先验，不为 1e-4 的噪声改默认值。
     """
 
     window_years: float = 3.0       # §4.6.2b 硬性要求：L_region 用 3 年滚动窗口
-    half_life_days: float = 180.0   # §9.6 四层结构：team/player rating 半衰期 180 天
-    sigma_player: float = 0.1294    # §9.4 实测 PLAYER 层效应 SD
-    sigma_team: float = 0.1330      # §9.4 实测 TEAM 层效应 SD
+    half_life_days: float = 270.0   # 调参段实测：180→270 给 ΔLL −0.00068，365 与 540 反弹
+    sigma_player: float = 0.2500    # 调参段实测最优（§9.4 的 0.1294 是真实效应 SD，不是先验宽度）
+    sigma_team: float = 0.7000      # 同上；队伍层先验必须放得比 §9.4 的 0.1330 松得多
     sigma_chem: float = 0.0500      # chemistry 残差，先验刻意收紧
     sigma_league: float = 0.3000    # 赛区偏移，桥接样本少 → 不能放太松
-    refit_every_days: int = 14
+    # 3 天一次重解：调参段上 28→14→7→3 天单调变好（0.632941→0.630505→0.628924→0.628324）。
+    # 这不是"更多信息"，而是**更新鲜的 as-of rating**：对照组 player Elo 是逐场在线更新的
+    # （rating 年龄 = 0），BT 每 N 天才重解一次，rating 平均老 N/2 天。粗网格是在自残。
+    refit_every_days: int = 3
     max_iter: int = 3000
     gtol: float = 1e-7
     min_games: int = 200            # 窗口内不足这么多场就不拟合（返回全零快照）
@@ -135,6 +174,26 @@ def bridge_census(df: pd.DataFrame, team_region: dict[str, str] | None = None) -
 
     手册 §4.6.1 给的参照系是「2022 年国际赛 235 场中跨赛区 193 场，桥接 43 个赛区对」。
     本函数在全库上重算，返回的 `pairs` 是 (赛区A, 赛区B) → 场次。
+
+    **全库实测（2026-09-19，load_dev 的 98,592 场）——结论是 ℓ_g 识别得了，
+    但桥接的来源和手册设想的不是一回事：**
+
+        跨赛区对战       18,418 场，482 个赛区对，88 个赛区
+        其中国际赛        2,190 场（tier=2 的 2,564 场里）——手册说的那种桥
+        其中国内赛       16,228 场，374 个赛区对 ←**真正的主力**
+
+    手册只数了国际赛，于是得出"每年约 200 场、几乎识别不了"的悲观结论。
+    实际上一二队/青训联赛的互打提供了 8 倍于国际赛的桥接量：
+    CK–LCK 904 场、LMS–PCS 559、LFL–LFL2 482、NACL–UPL 440、LDL–LPL 400。
+    这类桥是**纵向**的（同一国家的一队 vs 二队），国际赛那类是**横向**的（LCK vs LPL，311 场）。
+    两类合起来把 88 个赛区连成一张连通图：桥接 ≥100 场的赛区有 66 个，
+    ≥30 场的有 80 个，只有 6 个赛区桥接 <30 场、2 个赛区完全没有跨区对战。
+
+    本函数对 2022 年的复算与手册逐字对上（国际赛 235 场 / 跨区 193 场 / 45 对，
+    手册写 43 对，差在赛区归属的并列打破规则），可以认为口径一致。
+
+    **给调用方的硬约束**：桥接 <30 场的赛区，其 ℓ_g 基本就是先验（≈0），
+    不要拿它当"该赛区实力"解读；真要用，先查 `per_region`。
     """
     tr = team_region if team_region is not None else infer_team_region(df)
     rb = np.array([tr.get(str(t), UNKNOWN_REGION) for t in df.blue_team_id])
@@ -214,7 +273,17 @@ class HierBTSnapshot:
         blue_player_ids: Sequence[str | None],
         red_player_ids: Sequence[str | None],
     ) -> dict[str, float]:
-        """单场 BT 特征。**训练与推理共用这一个函数**（§7.4 train-serve skew）。"""
+        """单场 BT 特征。**训练与推理共用这一个函数**（§7.4 train-serve skew）。
+
+        名单**先补齐到 5 人**再求和（补位按 `player_rating(None, team)` = 队伍层 m_T）。
+        为什么必须补：silver 里 3.6% 的比赛某一侧只有 3-4 个非空 playerid
+        （评测口径 2019+ tier≥1 里是 97 场，且**全部是 4 打 5 的不对称缺失**）。
+        直接对 k 个人求和，等于把缺位那名选手的实力当成 0；而 rating 的零点是
+        "全球平均"，不是"该赛区平均"，于是强赛区的队伍会因为**缺数据**而被系统性削弱。
+        这类 bug 在总指标上只值 1e-5，但它对着特定的 97 场比赛稳定地给错方向。
+        """
+        blue_player_ids = _pad_roster(blue_player_ids)
+        red_player_ids = _pad_roster(red_player_ids)
         rb = [self.player_rating(p, blue_team_id) for p in blue_player_ids]
         rr = [self.player_rating(p, red_team_id) for p in red_player_ids]
         sb, sr = float(np.sum(rb)), float(np.sum(rr))
@@ -278,7 +347,15 @@ class _Design:
 
 
 def _build_design(win: pd.DataFrame, as_of: pd.Timestamp, cfg: HierBTConfig) -> _Design:
-    """列布局：[ r_player | c_team | b0 ]。m_team / l_region 只进先验，不进 A。"""
+    """列布局：[ r_player | c_team | b0 | m_team ]。l_region 只进先验，不进 A。
+
+    `m_team` 在 A 里的系数是 **(5 − 该场该侧的已知 playerid 数)**，
+    对 96.4% 的比赛这个数是 0，于是 m_T 对它们**只出现在先验里**，
+    模块顶部那段"用 m 承担水平、用 c 承担残差，避开共线性"的论证原封不动成立。
+    只有名单不全的那 3.6% 会让 m_T 露一次面：缺位那名选手被当作
+    "这支队的一名普通选手"，正好就是 `player_rating(None, team)` 的兜底口径。
+    不这么做的话，那几场的账会被硬塞给在场的 3-4 个人，把他们的 rating 顶高。
+    """
     age = (as_of - win.kickoff_utc).dt.total_seconds().to_numpy() / 86400.0
     w = 0.5 ** (np.maximum(age, 0.0) / cfg.half_life_days)
     team_region = infer_team_region(win)
@@ -312,9 +389,19 @@ def _build_design(win: pd.DataFrame, as_of: pd.Timestamp, cfg: HierBTConfig) -> 
     cols.extend([n_p + n_t] * n)
     vals.extend([1.0] * n)
 
+    # 名单不全时的补位：缺几个人就给 m_T 加几份
+    m_off = n_p + n_t + 1
+    for i in range(n):
+        for arr, t, sgn in ((bp[i], bt[i], 1.0), (rp[i], rt[i], -1.0)):
+            miss = ROSTER_SIZE - len(list(_iter_ids(arr)))
+            if miss > 0:
+                rows.append(i)
+                cols.append(m_off + tid[t])
+                vals.append(sgn * miss)
+
     A = sp.csr_matrix(
         (np.asarray(vals), (np.asarray(rows), np.asarray(cols))),
-        shape=(n, n_p + n_t + 1),
+        shape=(n, n_p + 2 * n_t + 1),
     )
 
     # 选手 → 归属队：窗口内衰减加权出场最多的那支
@@ -362,12 +449,14 @@ def _neg_log_post(theta: np.ndarray, d: _Design, cfg: HierBTConfig) -> tuple[flo
     n_p, n_t = len(d.pid), len(d.tid)
     n_l = len(d.lid)
     k = n_p + n_t + 1
-    eta = d.A @ theta[:k]
+    # A 的列跨到 m 块为止（θ 的前 k+n_t 位），ℓ 不进似然
+    kk = k + n_t
+    eta = d.A @ theta[:kk]
     # logaddexp 形式在 |eta| 很大时也稳定
     val = float(np.sum(d.w * (np.logaddexp(0.0, eta) - d.y * eta)))
     grad = np.zeros_like(theta)
     prob = 1.0 / (1.0 + np.exp(-eta))
-    grad[:k] = d.A.T @ (d.w * (prob - d.y))
+    grad[:kk] = d.A.T @ (d.w * (prob - d.y))
 
     r = theta[:n_p]
     c = theta[n_p:n_p + n_t]
@@ -489,9 +578,15 @@ def refit_grid(
     —— 换一个评测起点不会让同一场比赛拿到不同的快照（可复现性）。
     """
     t0 = df.kickoff_utc.min().normalize()
-    tn = df.kickoff_utc.max() if end is None else min(df.kickoff_utc.max(), pd.Timestamp(end))
+    tz = t0.tz
+
+    def _as_ts(v: pd.Timestamp) -> pd.Timestamp:
+        ts = pd.Timestamp(v)
+        return ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
+
+    tn = df.kickoff_utc.max() if end is None else min(df.kickoff_utc.max(), _as_ts(end))
     step = pd.Timedelta(days=cfg.refit_every_days)
-    lo = t0 if start is None else max(t0, pd.Timestamp(start))
+    lo = t0 if start is None else max(t0, _as_ts(start))
     first = t0 + step * int(np.ceil(max((lo - t0) / step, 0.0)))
     out: list[pd.Timestamp] = []
     t = first
@@ -499,6 +594,11 @@ def refit_grid(
         out.append(t)
         t = t + step
     return out
+
+
+def _to_utc_naive(v: pd.Timestamp | str) -> pd.Timestamp:
+    ts = pd.Timestamp(v)
+    return ts.tz_localize(None) if ts.tzinfo is None else ts.tz_convert("UTC").tz_localize(None)
 
 
 def rolling_ratings(
@@ -541,7 +641,7 @@ def rolling_ratings(
     last_hi = (
         np.datetime64("2999-01-01")
         if end is None
-        else np.datetime64(pd.Timestamp(end).tz_convert("UTC").tz_localize(None))
+        else np.datetime64(_to_utc_naive(end))
     )
     kick_naive = pd.DatetimeIndex(df.kickoff_utc).tz_convert("UTC").tz_localize(None).to_numpy()
     for gi, as_of in enumerate(grid):

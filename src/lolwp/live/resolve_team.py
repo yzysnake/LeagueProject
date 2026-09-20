@@ -38,7 +38,7 @@ def build_player_team_index(silver: pd.DataFrame) -> dict[str, tuple[str, str, p
             tid = getattr(r, f"{pfx}_team_id")
             tnm = getattr(r, f"{pfx}_team_name")
             for p in getattr(r, f"{pfx}_player_ids"):
-                if p is not None and p == p:
+                if p is not None and not pd.isna(p):
                     idx[str(p)] = (str(tid), str(tnm), r.kickoff_utc)
     return idx
 

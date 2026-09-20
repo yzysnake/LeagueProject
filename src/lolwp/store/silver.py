@@ -144,7 +144,6 @@ def acceptance(g: pd.DataFrame) -> dict[str, object]:
     """阶段 2 的验收①~④，返回可直接打印/写 /health 的结构。"""
     bronze = pd.read_parquet(BRONZE, columns=["gameid", "datacompleteness", "position"])
     tm = bronze[bronze.position == "team"].drop_duplicates("gameid")
-    complete_only = int((tm.datacompleteness == "complete").sum())
 
     res = {
         "①一场一行": {

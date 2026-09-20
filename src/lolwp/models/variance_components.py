@@ -25,6 +25,10 @@
 3. SVI 的用途是**交叉验证矩估计**（阶段 6 验收④要求两者「差异 <3 倍」），
    以及给出矩估计给不了的东西：**队内选手偏差** σ_player 与队伍层 σ_team 的分离。
    矩估计只能测到「选手胜率的边际离散度」，而那个量 98% 是他队友的功劳。
+4. 这把尺子准不准由 `simulate_design()` / `synthetic_recovery()` 自证：
+   在**真实的**出场结构上按已知 σ 造 y，再用同一套 SVI 读回来。
+   报告 §5 的偏倚方向（σ_champ 近无偏、σ_player 系统性低估、σ_team 会被吃掉）
+   全部来自这里，没有它，主结果里每个数字都无法判断偏在哪边。
 
 =========================== 单位：logit 还是胜率 ===========================
 分层模型的参数天然在 **logit** 上；手册的参考值 0.1294 / 0.1330 / 0.0229 在 **胜率**
@@ -43,7 +47,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -97,20 +101,24 @@ def _stack5(col: pd.Series) -> np.ndarray:
     return np.array([list(v) for v in col], dtype=object)
 
 
-def build_design(df: pd.DataFrame) -> VCDesign:
-    """从 silver 表建索引设计。缺 playerid / champion 的整场丢弃（§5.5 离线口径）。"""
-    bp, rp = _stack5(df.blue_player_ids), _stack5(df.red_player_ids)
-    bc, rc = _stack5(df.blue_champ_keys), _stack5(df.red_champ_keys)
-
+def _keep_mask(df: pd.DataFrame) -> np.ndarray:
+    """缺 playerid / champion / teamid 的整场丢弃（§5.5 的离线口径）。"""
     def _bad(a: np.ndarray) -> np.ndarray:
         return np.array([[x is None or (isinstance(x, float) and math.isnan(x))
                           for x in row] for row in a]).any(axis=1)
 
-    keep = ~(_bad(bp) | _bad(rp) | _bad(bc) | _bad(rc))
-    keep &= df.blue_team_id.notna().to_numpy() & df.red_team_id.notna().to_numpy()
-    df = df.loc[keep].reset_index(drop=True)
-    bp, rp, bc, rc = bp[keep], rp[keep], bc[keep], rc[keep]
+    keep = ~(_bad(_stack5(df.blue_player_ids)) | _bad(_stack5(df.red_player_ids))
+             | _bad(_stack5(df.blue_champ_keys)) | _bad(_stack5(df.red_champ_keys)))
+    keep = keep & df.blue_team_id.notna().to_numpy() & df.red_team_id.notna().to_numpy()
+    return np.asarray(keep, dtype=bool)
 
+
+def build_design(df: pd.DataFrame) -> VCDesign:
+    """从 silver 表建索引设计。缺 playerid / champion 的整场丢弃（§5.5 离线口径）。"""
+    keep = _keep_mask(df)
+    df = df.loc[keep].reset_index(drop=True)
+    bp, rp = _stack5(df.blue_player_ids), _stack5(df.red_player_ids)
+    bc, rc = _stack5(df.blue_champ_keys), _stack5(df.red_champ_keys)
     def _index(values: Sequence[Any]) -> tuple[dict[Any, int], list[str]]:
         uniq = sorted({str(v) for v in values})
         return {v: i for i, v in enumerate(uniq)}, uniq
@@ -278,7 +286,7 @@ class SVIFit:
             "tail_mean": float(tail.mean()),
             "tail_std": float(tail.std()),
             "tail_drift": drift,
-            "tail_drift_over_std": drift / (tail.std() + 1e-12),
+            "tail_drift_over_std": float(drift / (tail.std() + 1e-12)),
         }
 
 
@@ -375,6 +383,8 @@ class MomentEstimate:
 def _bootstrap_sigma(
     n: np.ndarray, w: np.ndarray, *, n_boot: int, seed: int
 ) -> tuple[float, float]:
+    if n_boot <= 0:                      # n_boot=0 用于"只要点估计"的批量扫描
+        return float("nan"), float("nan")
     rng = np.random.default_rng(seed)
     e = len(n)
     out = np.empty(n_boot)
@@ -513,7 +523,7 @@ def player_champ_residual_moment(
     #    点估计 0 也能 bootstrap 出 [0.11,0.12] 的 CI（第一版就是这么错的）。
     uniq_pl = np.unique(pl)
     idx_by_pl = {p: np.flatnonzero(pl == p) for p in uniq_pl}
-    boots = np.empty(min(n_boot, 200))
+    boots = np.empty(max(min(n_boot, 200), 0))
     for b in range(len(boots)):
         pick = rng.choice(uniq_pl, len(uniq_pl), replace=True)
         sel = np.concatenate([idx_by_pl[p] for p in pick])
@@ -537,7 +547,8 @@ def player_champ_residual_moment(
         level="player:champion", n_units=len(cells), n_obs=len(resid),
         median_obs_per_unit=float(np.median(np.bincount(cell_inv))),
         var=float(var), sigma=sigma,
-        ci=(float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))),
+        ci=((float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5)))
+            if len(boots) else (float("nan"), float("nan"))),
         k=(BERNOULLI_VAR_AT_HALF / var) if var > 0 else float("inf"),
     )
     est.debug = {"obs_var": float(obs_var), "null_var_mean": float(null.mean()),
@@ -588,9 +599,19 @@ _ENTITY_LOGIT_MULTIPLIER: dict[str, float] = {
 }
 
 
-def summarize_levels(fit: SVIFit) -> list[LevelSummary]:
+def pool_sigmas(fits: Sequence[SVIFit]) -> dict[str, np.ndarray]:
+    """把多个种子的后验样本拼起来。
+
+    mean-field 的单次 CI 只反映"给定这个局部最优"的不确定度，**不含 VI 自身的
+    随机性**。把种子拼起来报出的 CI 才同时含这两部分，是更诚实的区间。
+    """
+    keys = [k for k in SIGMA_SITES if all(k in f.sigmas for f in fits)]
+    return {k: np.concatenate([f.sigmas[k] for f in fits]) for k in keys}
+
+
+def summarize_levels(sigmas: dict[str, np.ndarray]) -> list[LevelSummary]:
     out = []
-    for site, s in fit.sigmas.items():
+    for site, s in sigmas.items():
         lo, med, hi = (float(x) for x in np.percentile(s, [2.5, 50.0, 97.5]))
         em = _ENTITY_LOGIT_MULTIPLIER[site]
         wr = tuple(LOGIT_TO_WINRATE * em * x for x in (lo, med, hi))
@@ -603,7 +624,7 @@ def summarize_levels(fit: SVIFit) -> list[LevelSummary]:
     return out
 
 
-def team_marginal_winrate_sd(fit: SVIFit) -> np.ndarray:
+def team_marginal_winrate_sd(sigmas: dict[str, np.ndarray]) -> np.ndarray:
     """模型隐含的「队伍边际胜率 SD」——用来和矩估计的 team/player 层直接对表。
 
     一支队面对平均对手时的 logit = 5·t + Σ_{5 人} dev，
@@ -611,8 +632,8 @@ def team_marginal_winrate_sd(fit: SVIFit) -> np.ndarray:
     矩估计的 team 层和 player 层测的都是这个量（选手的胜率就是他队伍的胜率），
     这解释了手册里 player 0.1294 与 team 0.1330 为什么几乎一样。
     """
-    st = fit.sigmas["sigma_team"]
-    sp = fit.sigmas["sigma_player"]
+    st = sigmas["sigma_team"]
+    sp = sigmas["sigma_player"]
     return LOGIT_TO_WINRATE * np.sqrt(25.0 * st**2 + 5.0 * sp**2)
 
 
@@ -639,12 +660,233 @@ def moment_stability_over_origins(
 
 
 # --------------------------------------------------------------------------- #
+# 时间外推检验：测出来的 σ_player 到底是信号还是过拟合
+# --------------------------------------------------------------------------- #
+def subset_design(d: VCDesign, mask: np.ndarray) -> VCDesign:
+    """按行掩码切子设计。**实体索引空间保持不变**（不重新编号），
+
+    这样训练段拟合出的 effects 可以直接下标到测试段——测试段里训练段没见过的实体
+    自然落到后验 ≈ 先验 ≈ 0，就是 §5.5 要求的 fallback 行为。
+    """
+    m = np.asarray(mask, bool)
+    return VCDesign(
+        y=d.y[m], league=d.league[m],
+        blue_team=d.blue_team[m], red_team=d.red_team[m],
+        blue_player=d.blue_player[m], red_player=d.red_player[m],
+        blue_champ=d.blue_champ[m], red_champ=d.red_champ[m],
+        blue_pc=d.blue_pc[m], red_pc=d.red_pc[m],
+        team_region=d.team_region,
+        n_league=d.n_league, n_region=d.n_region, n_team=d.n_team,
+        n_player=d.n_player, n_champ=d.n_champ, n_pc=d.n_pc, labels=d.labels,
+    )
+
+
+def predict_logits(effects: dict[str, np.ndarray], d: VCDesign) -> np.ndarray:
+    """用后验均值算 logit。mean-field guide 下 E[σ·raw] = E[σ]·E[raw]，所以可以逐项相乘。"""
+    def g(k: str) -> np.ndarray:
+        return np.asarray(effects[k])
+
+    region = g("sigma_region") * g("region_raw")
+    team = region[d.team_region] + g("sigma_team") * g("team_raw")
+    out = g("side_mu") + g("sigma_side") * g("side_raw")[d.league]
+    out = out + 5.0 * (team[d.blue_team] - team[d.red_team])
+    if "player_raw" in effects:
+        dev = g("sigma_player") * g("player_raw")
+        out = out + dev[d.blue_player].sum(-1) - dev[d.red_player].sum(-1)
+    if "champ_raw" in effects:
+        ch = g("sigma_champ") * g("champ_raw")
+        out = out + ch[d.blue_champ].sum(-1) - ch[d.red_champ].sum(-1)
+    if "pc_raw" in effects:
+        pc = g("sigma_pc") * g("pc_raw")
+        out = out + pc[d.blue_pc].sum(-1) - pc[d.red_pc].sum(-1)
+    return np.asarray(out, float)
+
+
+def temporal_predictive_check(
+    df: pd.DataFrame,
+    *,
+    split: str,
+    steps: int = 30_000,
+    lr: float = 0.02,
+    seed: int = 0,
+    variants: Sequence[tuple[str, bool, bool, bool]] = (
+        ("team only", False, False, False),
+        ("+player", True, False, False),
+        ("+player+champ", True, True, False),
+        ("+player+champ+pc", True, True, True),
+    ),
+) -> pd.DataFrame:
+    """在 `split` 之前拟合、之后评估。**这是判断 σ_player 是不是过拟合的唯一硬证据。**
+
+    分层模型里一个层的 σ 大，只说明"这一层的随机效应吃掉了很多训练集方差"，
+    不说明它能外推——2,029 个选手 vs 240 支队伍，选手层的自由度是队伍层的 8.5 倍，
+    完全可能只是在记住训练集。所以必须做一次严格向前的时间外推。
+
+    注意这是**静态**效应（无时间衰减），外推到一年后必然劣于在线 Elo；
+    这里只看**层与层之间的相对差**，不与 L2/L3 的绝对数字对比。
+    """
+    d = build_design(df)
+    # build_design 会丢掉缺 id 的场次，行掩码必须用同一套过滤后再切
+    before = (df.kickoff_utc < pd.Timestamp(split, tz="UTC")).to_numpy()
+    tr = before[_keep_mask(df)]
+    d_tr, d_te = subset_design(d, tr), subset_design(d, ~tr)
+    rows = []
+    for name, up, uc, upc in variants:
+        fit = fit_svi(d_tr, seed=seed, steps=steps, lr=lr, use_player=up,
+                      use_champ=uc, use_pc=upc, keep_effects=True, n_draw=600)
+        lg = predict_logits(fit.effects, d_te)
+        p = 1.0 / (1.0 + np.exp(-np.clip(lg, -30, 30)))
+        y = d_te.y
+        ll = float(-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean())
+        rows.append({"variant": name, "n_train": d_tr.n_games, "n_test": d_te.n_games,
+                     "oos_logloss": ll, "oos_brier": float(((p - y) ** 2).mean()),
+                     "sigma_player": float(np.median(fit.sigmas["sigma_player"]))
+                     if "sigma_player" in fit.sigmas else float("nan"),
+                     "wall_s": fit.wall_seconds})
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------- #
+# 跨种子稳定性：手册验收⑧那条 max|Δlogit| < 1e-3 到底过不过
+# --------------------------------------------------------------------------- #
+def cross_seed_logit_stability(
+    d: VCDesign,
+    *,
+    seeds: Sequence[int] = (0, 1),
+    steps: int = 30_000,
+    lr: float = 0.02,
+    n_draw: int = 600,
+) -> dict[str, float]:
+    """两个种子各拟合一次，比对**逐场 logit**，不是比 σ。
+
+    为什么必须单独测这个：σ 的跨种子 CV 只有 1–3%，看上去很稳；但 σ 稳不等于
+    per-entity 的 rating 稳。本设计有 3.8 万个随机效应，其中大量个体弱可识别
+    （一个只打过 3 场的选手，他的效应和队友的效应换来换去似然几乎不变），
+    mean-field SVI 会停在不同的局部最优。**只报 σ 会把这件事完全盖住。**
+
+    手册验收⑧给 BT/SVI 这一支定的是 T2 档 B「固定 seed bit-identical 且跨 seed
+    `max|Δlogit| < 1e-3`」。本函数产出的就是那条门禁的实测值，**报告 §3.3
+    判它不过，靠的是这里的数字**。对本模块无所谓（它只对外报 σ），
+    但谁要把 SVI/BT 的 per-entity rating 送进生产，得先看这个数。
+    """
+    fits = [
+        fit_svi(d, seed=s, steps=steps, lr=lr, keep_effects=True, n_draw=n_draw)
+        for s in seeds
+    ]
+    lg = [predict_logits(f.effects, d) for f in fits]
+    dl = np.abs(lg[0] - lg[1])
+    prob = [1.0 / (1.0 + np.exp(-np.clip(x, -30, 30))) for x in lg]
+    dp = np.abs(prob[0] - prob[1])
+    return {
+        "n_games": float(d.n_games),
+        "max_abs_dlogit": float(dl.max()),
+        "p99_abs_dlogit": float(np.percentile(dl, 99)),
+        "median_abs_dlogit": float(np.median(dl)),
+        "corr_logit": float(np.corrcoef(lg[0], lg[1])[0, 1]),
+        "max_abs_dp": float(dp.max()),
+        "mean_abs_dp": float(dp.mean()),
+        "gate_1e_3_passed": float(dl.max() < 1e-3),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 合成恢复检验：这把尺子本身准不准
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SyntheticTruth:
+    """合成数据的真参数（logit 单位）。默认值就是报告 §5 那张表的固定背景。"""
+
+    sigma_player: float
+    sigma_team: float = 0.06
+    sigma_pc: float = 0.0
+    sigma_champ: float = 0.07
+    sigma_region: float = 0.12
+    sigma_side: float = 0.05
+    side_mu: float = 0.10
+
+
+def simulate_design(d: VCDesign, truth: SyntheticTruth, *, seed: int) -> VCDesign:
+    """保留真实索引结构（同一批场次、同一张出场表），只按已知 σ 重新生成 y。
+
+    **必须用真实的索引结构，不能随机造图**：σ_player 与 σ_team 能不能分开，
+    完全取决于「谁和谁同队、每个实体打了多少场」这张二部图的共线程度，
+    而那是这份数据自己的性质。换成随机图就测不出真实的塌陷风险（见 §5 / §7.1：
+    真 σ_player=0.30 时 σ_team 被吃到 0.0016，全 dev 口径上这个塌陷真的发生了）。
+
+    抽样顺序（region→team→player→champ→pc→side→y）与 y 的伯努利抽取共用同一个
+    `default_rng(1000+seed)`，改动顺序会改变全部数字，报告里的表就对不上了。
+    """
+    rng = np.random.default_rng(1000 + seed)
+    region = rng.normal(0.0, truth.sigma_region, d.n_region)
+    team = region[d.team_region] + rng.normal(0.0, truth.sigma_team, d.n_team)
+    dev = rng.normal(0.0, truth.sigma_player, d.n_player)
+    champ = rng.normal(0.0, truth.sigma_champ, d.n_champ)
+    pc = (rng.normal(0.0, truth.sigma_pc, d.n_pc) if truth.sigma_pc > 0
+          else np.zeros(d.n_pc))
+    side = truth.side_mu + rng.normal(0.0, truth.sigma_side, d.n_league)
+    lg = side[d.league] + 5.0 * (team[d.blue_team] - team[d.red_team])
+    lg = lg + dev[d.blue_player].sum(-1) - dev[d.red_player].sum(-1)
+    lg = lg + champ[d.blue_champ].sum(-1) - champ[d.red_champ].sum(-1)
+    lg = lg + pc[d.blue_pc].sum(-1) - pc[d.red_pc].sum(-1)
+    p = 1.0 / (1.0 + np.exp(-lg))
+    return replace(d, y=(rng.random(d.n_games) < p).astype(np.int32))
+
+
+def synthetic_recovery(
+    d: VCDesign,
+    truths: Sequence[tuple[SyntheticTruth, int]],
+    *,
+    steps: int = 30_000,
+    lr: float = 0.02,
+) -> pd.DataFrame:
+    """对每个 (真参数, 种子) 生成一份合成 y 再跑同一套 SVI，看能不能读回来。
+
+    **报告里最重要的一段就靠这个函数**：没有它，主结果里每个 σ 的偏倚方向都无从判断。
+    `(truth, seed)` 里的 seed 同时用作生成种子（`1000+seed`）与 SVI 种子，
+    这样一行表 = 一个可复现的整数。
+    """
+    rows: list[dict[str, Any]] = []
+    for truth, seed in truths:
+        ds = simulate_design(d, truth, seed=seed)
+        f = fit_svi(ds, seed=seed, steps=steps, lr=lr, use_pc=True)
+        s = f.summary().set_index("site")
+        row: dict[str, Any] = {
+            "true_player": truth.sigma_player, "true_team": truth.sigma_team,
+            "true_champ": truth.sigma_champ, "true_pc": truth.sigma_pc,
+            "base_rate": float(ds.y.mean()), "seed": seed,
+            "wall_s": round(f.wall_seconds, 1),
+        }
+        for site, tag in (("sigma_player", "player"), ("sigma_team", "team"),
+                          ("sigma_champ", "champ"), ("sigma_pc", "pc")):
+            row[f"est_{tag}"] = float(s.loc[site, "median"])
+            row[f"lo95_{tag}"] = float(s.loc[site, "lo95"])
+            row[f"hi95_{tag}"] = float(s.loc[site, "hi95"])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------- #
 # yaml 落盘
 # --------------------------------------------------------------------------- #
+def _plain(obj: Any) -> Any:
+    """递归把 numpy 标量换成 python 标量。
+
+    `yaml.safe_dump` 见到 `np.float64` 直接抛 RepresenterError，
+    而 `round(np.float64)` 返回的还是 `np.float64`——这个坑必须在出口统一堵死。
+    """
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_plain(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return obj
+
+
 def write_shrinkage_yaml(
     path: str,
     *,
-    fit: SVIFit,
+    sigmas: dict[str, np.ndarray],
     moments: dict[str, MomentEstimate],
     meta: dict[str, Any],
 ) -> str:
@@ -656,7 +898,7 @@ def write_shrinkage_yaml(
     """
     import yaml
 
-    levels = {s.level: s for s in summarize_levels(fit)}
+    levels = {s.level: s for s in summarize_levels(sigmas)}
     site_of = {"player": "sigma_player", "team": "sigma_team",
                "champion": "sigma_champ", "player:champion": "sigma_pc"}
     doc: dict[str, Any] = {
@@ -677,7 +919,7 @@ def write_shrinkage_yaml(
             "n_units": e.n_units, "n_obs": e.n_obs,
             "median_obs_per_unit": e.median_obs_per_unit,
         }
-        doc["k"][lvl] = None if math.isinf(e.k) else round(e.k)
+        doc["k"][lvl] = None if math.isinf(e.k) else round(float(e.k))
     for lvl, site in site_of.items():
         if site not in levels:
             continue
@@ -691,6 +933,99 @@ def write_shrinkage_yaml(
             "side_logit_sd": round(s.side_logit_sd, 6),
             "k_from_svi": (None if math.isinf(s.k[1]) else round(s.k[1], 1)),
         }
+    # 只有分层模型能给的那一层：**队内选手偏差**。矩估计给不了——
+    # 一个选手的胜率就是他队伍的胜率，矩估计测到的 player 层 98% 是队友的功劳。
+    if "sigma_player" in levels:
+        s = levels["sigma_player"]
+        doc["k"]["player_within_team"] = (
+            None if math.isinf(s.k[1]) else round(float(s.k[1]))
+        )
+        doc["svi_only"] = {
+            "player_within_team": {
+                "sigma_logit_median": round(s.sigma_logit[1], 6),
+                "ci95_logit": [round(s.sigma_logit[0], 6), round(s.sigma_logit[2], 6)],
+                "sigma_winrate": round(s.entity_winrate[1], 6),
+                "k": None if math.isinf(s.k[1]) else round(s.k[1], 1),
+                "_note": "矩估计测不到这一层；只有分层模型能把队伍与选手分开",
+            }
+        }
+    # 对表：模型隐含的队伍边际胜率 SD vs 矩估计的 team 层（验收④的"同量级"判据）
+    if {"sigma_team", "sigma_player"} <= set(sigmas):
+        agg = team_marginal_winrate_sd(sigmas)
+        lo, med, hi = (float(x) for x in np.percentile(agg, [2.5, 50.0, 97.5]))
+        mom = moments.get("team")
+        doc["crosscheck_team_marginal"] = {
+            "svi_implied_sigma_winrate": round(med, 6),
+            "svi_ci95": [round(lo, 6), round(hi, 6)],
+            "moment_sigma_winrate": None if mom is None else round(mom.sigma, 6),
+            "ratio_svi_over_moment": (
+                None if mom is None or mom.sigma <= 0 else round(med / mom.sigma, 3)
+            ),
+        }
+    # 先序列化到字符串再落盘：`yaml.safe_dump(fh)` 直接写文件的话，一旦中途抛
+    # RepresenterError（np.float64 就会），文件已经被 "w" 截成 0 字节 —— 本仓库
+    # 的 configs/shrinkage_constants.yaml 就这么空了一次，从 traceback 看不出来。
+    text = yaml.safe_dump(_plain(doc), allow_unicode=True, sort_keys=False, width=100)
     with open(path, "w") as fh:
-        yaml.safe_dump(doc, fh, allow_unicode=True, sort_keys=False, width=100)
-    return json.dumps({"written": path}, ensure_ascii=False)
+        fh.write(text)
+    return json.dumps({"written": path, "bytes": len(text)}, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
+# CLI：一次跑完，产出 yaml + ELBO 曲线 csv
+# --------------------------------------------------------------------------- #
+DEFAULT_MIN_TIER = 1
+DEFAULT_SINCE = "2019-01-01"
+YAML_PATH = "configs/shrinkage_constants.yaml"
+ELBO_CSV = "reports/stage6_variance_components_elbo.csv"
+
+
+def main(
+    *,
+    seeds: Sequence[int] = (0, 1, 2, 3, 4),
+    steps: int = 30_000,
+    lr: float = 0.02,
+    min_tier: int = DEFAULT_MIN_TIER,
+    since: str = DEFAULT_SINCE,
+    n_boot: int = 300,
+    yaml_path: str = YAML_PATH,
+    elbo_csv: str = ELBO_CSV,
+) -> dict[str, Any]:
+    """跑一次完整定标。**只用 load_dev()，holdout 物理不可达。**"""
+    from lolwp.features.loader import load_dev
+
+    df = load_dev(min_tier=min_tier, since=since)
+    d = build_design(df)
+    fits = [fit_svi(d, seed=s, steps=steps, lr=lr) for s in seeds]
+    sig = pool_sigmas(fits)
+    moments = moment_variance_components(df, n_boot=n_boot, seed=7)
+
+    step_idx = np.arange(0, steps, max(steps // 600, 1))
+    elbo = pd.DataFrame({"step": step_idx})
+    for f in fits:
+        elbo[f"neg_elbo_seed{f.seed}"] = f.losses[step_idx]
+    elbo.to_csv(elbo_csv, index=False)
+
+    meta = {
+        "dataset": "data/silver/games.parquet",
+        "filter": f"load_dev(min_tier={min_tier}, since={since!r})  # holdout 物理排除",
+        "holdout_start": str(df.attrs.get("holdout_start")),
+        "n_games_loaded": len(df),
+        "n_games_modelled": d.n_games,
+        "n_player": d.n_player, "n_team": d.n_team, "n_region": d.n_region,
+        "n_champion": d.n_champ, "n_player_champion_cells": d.n_pc,
+        "svi": {"guide": "AutoNormal", "optimizer": f"Adam(lr={lr})",
+                "steps": steps, "seeds": list(seeds),
+                "wall_seconds_total": round(sum(f.wall_seconds for f in fits), 1)},
+    }
+    write_shrinkage_yaml(yaml_path, sigmas=sig, moments=moments, meta=meta)
+    return {"sigmas": sig, "moments": moments, "fits": fits, "meta": meta,
+            "design": d}
+
+
+if __name__ == "__main__":  # pragma: no cover
+    out = main()
+    print(pd.DataFrame(
+        [s.__dict__ for s in summarize_levels(out["sigmas"])]).to_string(index=False))
+    print(pd.DataFrame(
+        [e.as_row() for e in out["moments"].values()]).to_string(index=False))
