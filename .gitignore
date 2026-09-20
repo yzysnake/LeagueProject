@@ -33,3 +33,4 @@ __pycache__/
 
 # 构建产物：可由代码 + 数据重新生成，不进版本库
 frontend/public/dd/
+logs/
