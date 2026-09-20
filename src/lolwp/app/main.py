@@ -44,6 +44,20 @@ def _champs() -> dict:
     }
 
 
+@st.cache_resource
+def _poller():
+    """轮询器做成 cache_resource，才能跨 Streamlit rerun 保持 watchlist 与计时状态。
+
+    构建失败（网络不通、crosswalk 缺失）时返回 None，实时 tab 整体降级为提示，
+    **手动摆阵容不受任何影响**——实时是增强功能不是依赖。
+    """
+    try:
+        from lolwp.live.poller import build_default_poller
+        return build_default_poller()
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 @st.cache_data
 def _games() -> pd.DataFrame:
     g = pd.read_parquet(SILVER)
@@ -217,6 +231,91 @@ def tab_history(art: Artifact, champs: dict, games: pd.DataFrame) -> None:
     st.dataframe(df, hide_index=True, width="stretch")
 
 
+_STATUS_UI = {
+    "ready":       ("✅", "阵容已读取，预测就绪"),
+    "waiting":     ("⏳", "BP 已开始但还没开局读条"),
+    "no_coverage": ("🚫", "该赛事无 livestats 覆盖"),
+    "forbidden":   ("🔒", "接口鉴权失败，已降级"),
+    "error":       ("⚠️", "接口异常，正在重试"),
+    "finished":    ("🏁", "本局已结束"),
+}
+
+
+@st.fragment(run_every="30s")
+def _live_panel(art: Artifact, champs: dict) -> None:
+    """每 30 秒自动刷新一次。轮询间隔由 Poller 自己控制（getLive 60s / window 30s），
+    这里只是触发 tick，不会真的每 30 秒打一次远端。"""
+    pol = _poller()
+    if isinstance(pol, dict):
+        st.error(f"轮询器无法构建：{pol['error']}", icon="🚫")
+        st.info("实时功能不可用不影响「阵容模拟」——那一页完全离线。", icon="💡")
+        return
+    try:
+        pol.tick()
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"本次轮询失败（已保留上次结果）：{type(e).__name__}: {e}", icon="⚠️")
+
+    snap, health = pol.snapshot(), pol.health()
+    c = st.columns(4)
+    c[0].metric("监视中的对局", health["n_watched"])
+    c[1].metric("已出预测", health["by_status"].get("ready", 0))
+    c[2].metric("实体解析率", f"{health['live_resolve_rate']:.0%}")
+    c[3].metric("接口状态", "降级" if health["api_degraded"] else "正常")
+    st.caption(f"最后刷新 {pd.Timestamp.now(tz='UTC').strftime('%H:%M:%S')} UTC　｜　"
+               f"getLive 轮询 {snap['n_live_polls']} 次，window {snap['n_window_polls']} 次")
+
+    games = snap.get("games") or []
+    if not games:
+        st.info("当前没有正在进行的比赛。有比赛开打时这里会自动出现。", icon="😴")
+        return
+
+    for g in games:
+        icon, _ = _STATUS_UI.get(g["status"], ("•", ""))
+        title = f"{icon} {g.get('league','?')}　{' vs '.join(g.get('teams') or ['?','?'])}"
+        with st.expander(title, expanded=(g["status"] == "ready")):
+            st.caption(g.get("message", ""))
+            pred = g.get("prediction")
+            if g["status"] != "ready" or not pred:
+                if g["status"] == "waiting":
+                    st.caption(
+                        "注意：赛程接口标 `inProgress` 时比赛**未必**已开打——"
+                        "它标的是「局间休息 + BP 开始」。唯一权威的开赛信号是 "
+                        "livestats 的 204→200 跳变，本页等的就是它。"
+                    )
+                continue
+            p_blue = pred.get("p_blue")
+            if p_blue is None:
+                st.warning("阵容已读到但概率未产出，请看下方 warnings。")
+            else:
+                _prob_bar(float(p_blue), g.get("warnings") or [])
+                lay = pred.get("layers") or {}
+                if lay:
+                    cc = st.columns(3)
+                    for col, k in zip(cc, ["实力", "阵容", "赛况"]):
+                        col.metric(f"{k}层", f"{lay.get(k, 0.0):+.3f}")
+            rows = []
+            for side, cn in (("blue", "蓝"), ("red", "红")):
+                for role, ck, nm in zip(ROLES, pred.get(f"{side}_champ_keys") or [],
+                                        pred.get(f"{side}_names") or []):
+                    ch = champs["by_key"].get(int(ck)) if ck else None
+                    rows.append({"边": cn, "位置": ROLE_CN[role],
+                                 "英雄": ch["name"] if ch else "?", "选手": nm})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            lat = g.get("latency_200_to_pred_s")
+            if lat is not None:
+                st.caption(f"从 livestats 首次 200 到本页出概率：{lat:.3f} 秒")
+
+
+def tab_live(art: Artifact, champs: dict) -> None:
+    st.subheader("实时比赛")
+    st.caption(
+        "自动发现正在进行的职业比赛，读取 BP 结束后的阵容并给出胜率。"
+        "数据来自 Riot 的非官方 livestats 接口，无 SLA，随时可能变；"
+        "**接口不可用时本页降级，不影响其它页面。**"
+    )
+    _live_panel(art, champs)
+
+
 def main() -> None:
     st.set_page_config(page_title="LoL 职业赛胜率预测", layout="wide")
     st.title("英雄联盟职业比赛胜率预测")
@@ -226,12 +325,14 @@ def main() -> None:
         f"{art.meta['n_train_games']:,} 场　｜　walk-forward OOS log loss {art.meta['oos_log_loss']}"
         f"　｜　英雄数据 Data Dragon {champs['version']}"
     )
-    t1, t2, t3 = st.tabs(["阵容模拟", "what-if", "历史回看"])
+    t1, t2, t3, t4 = st.tabs(["阵容模拟", "what-if", "实时比赛", "历史回看"])
     with t1:
         tab_simulate(art, champs, games)
     with t2:
         tab_whatif(art, champs)
     with t3:
+        tab_live(art, champs)
+    with t4:
         tab_history(art, champs, games)
 
     st.divider()
