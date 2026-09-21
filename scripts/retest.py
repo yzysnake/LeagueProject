@@ -34,6 +34,10 @@ def main() -> int:
             v = "**通过**" if r.passed else "未过"
             print(f"{r.key:<24}{r.n_games:>9,}{r.statistic:>11.5f}"
                   f"{r.threshold:>11.5f}{r.margin:>7.2f}×  {v}")
+        n_same = int(df.unchanged.sum()) if "unchanged" in df else 0
+        if n_same:
+            print(f"\n  其中 {n_same}/{len(df)} 项与上次逐位相同 → 未写入台账，"
+                  "但这是一次免费的确定性复核（同数据同结果）。")
 
     h = history()
     if h.empty:

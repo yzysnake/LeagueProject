@@ -48,6 +48,7 @@ class Result:
     passed: bool
     margin: float                  # statistic / threshold，>1 即通过
     detail: dict[str, Any] = field(default_factory=dict)
+    unchanged: bool = False        # 与上次逐位相同 → 不写台账，但算一次确定性复核
 
 
 # ─────────────────────────── 各假设的重测实现 ───────────────────────────
@@ -153,8 +154,27 @@ REGISTRY: list[Hypothesis] = [
 ]
 
 
+def _last_per_key(ledger: str) -> dict[str, dict]:
+    if not os.path.exists(ledger):
+        return {}
+    out: dict[str, dict] = {}
+    with open(ledger) as fh:
+        for line in fh:
+            if line.strip():
+                r = json.loads(line)
+                out[r["key"]] = r
+    return out
+
+
 def run_all(keys: list[str] | None = None, ledger: str = LEDGER) -> pd.DataFrame:
+    """跑重测并**只在结果有变化时**追加。
+
+    为什么要去重：同一份数据重跑会产生逐位相同的条目，灌进台账只会淹没趋势。
+    但重跑本身有价值——它是一次免费的确定性检查，所以结果仍然返回，
+    只是标记 `appended=False`。
+    """
     today = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    prev = _last_per_key(ledger)
     rows: list[Result] = []
     for h in REGISTRY:
         if keys and h.key not in keys:
@@ -167,14 +187,25 @@ def run_all(keys: list[str] | None = None, ledger: str = LEDGER) -> pd.DataFrame
         thr = r["threshold"] if h.threshold == 0.0 else h.threshold
         stat = r["statistic"]
         passed = stat > thr if h.threshold == 0.0 else stat >= thr
-        rows.append(Result(key=h.key, run_date=today, n_games=r["n_games"],
-                           statistic=stat, threshold=thr, passed=bool(passed),
-                           margin=float(stat / thr) if thr else float("nan"),
-                           detail=r.get("detail", {})))
+        res = Result(key=h.key, run_date=today, n_games=r["n_games"],
+                     statistic=stat, threshold=thr, passed=bool(passed),
+                     margin=float(stat / thr) if thr else float("nan"),
+                     detail=r.get("detail", {}))
+        old = prev.get(h.key)
+        res.unchanged = bool(
+            old and old["n_games"] == res.n_games
+            and abs(old["statistic"] - res.statistic) < 1e-12
+        )
+        rows.append(res)
+
+    fresh = [r for r in rows if not r.unchanged]
     os.makedirs(os.path.dirname(ledger) or ".", exist_ok=True)
-    with open(ledger, "a") as fh:
-        for r in rows:
-            fh.write(json.dumps(asdict(r), ensure_ascii=False, default=str) + "\n")
+    if fresh:
+        with open(ledger, "a") as fh:
+            for r in fresh:
+                d = asdict(r)
+                d.pop("unchanged", None)
+                fh.write(json.dumps(d, ensure_ascii=False, default=str) + "\n")
     return pd.DataFrame([asdict(r) for r in rows])
 
 

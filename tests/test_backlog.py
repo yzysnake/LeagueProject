@@ -69,6 +69,38 @@ def test_nothing_that_passed_the_gate_is_still_parked():
             "要么加进去，要么在 REGISTRY 里写明为何仍不采纳。")
 
 
+@pytest.mark.skipif(not LEDGER.exists(), reason="台账尚未产生")
+def test_ledger_has_no_zero_information_duplicates():
+    """同一份数据重跑会产生逐位相同的条目。它们有价值（确定性复核），
+    但灌进台账只会淹没趋势，所以 run_all 会跳过写入。
+
+    这条测试保证去重真的生效——否则每跑一次 make retest 台账就膨胀一倍。
+    """
+    import json as _j
+    rows = [_j.loads(x) for x in LEDGER.read_text().splitlines() if x.strip()]
+    seen = set()
+    dup = []
+    for r in rows:
+        k = (r["key"], r["n_games"], round(r["statistic"], 12))
+        if k in seen:
+            dup.append(k)
+        seen.add(k)
+    assert not dup, f"台账里有零信息的重复条目：{dup}"
+
+
+def test_rerun_is_deterministic():
+    """重跑两次必须给出逐位相同的统计量。
+
+    若不同，说明重测本身带随机性，那么「趋势」就无从谈起——
+    数字的变化分不清是数据积累还是抖动。
+    """
+    from lolwp.ops.backlog import _reliability
+    a = _reliability("counter")
+    b = _reliability("counter")
+    assert a["statistic"] == b["statistic"], (
+        f"重跑结果不同：{a['statistic']} vs {b['statistic']}，趋势将不可解读")
+
+
 def test_makefile_exposes_retest():
     mk = (ROOT / "Makefile").read_text()
     for t in ["retest:", "retest-history:", "install-cron:"]:
