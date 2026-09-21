@@ -215,3 +215,34 @@ def test_ladder_is_monotone_improving():
     v = {n: ll(s.y.to_numpy(), s.p.to_numpy()) for n, s in preds.groupby("model")}
     assert v["L0"] > v["L2"] > v["L3"]
     assert v["L1"] < v["L0"]
+
+
+def test_series_context_stays_out_of_production():
+    """阶段后实验：BO 内序列上下文未过门禁，不得悄悄进生产特征集。
+
+    实验见 reports/exp_series_context.md：
+    S_score 在全样本 ΔLL +0.00073（MDE 0.00084）、非首局 +0.00168（MDE 0.00179），
+    两段留出期都未超 MDE。是全项目最接近通过的一次近失，但仍未过。
+    """
+    from lolwp.models.artifact import PROD_FEATURES
+    banned = {"game_in_series", "game_is_even", "series_score_diff",
+              "is_match_point", "is_first_game"}
+    leaked = banned & set(PROD_FEATURES)
+    assert not leaked, f"未过门禁的序列特征进了生产模型：{leaked}"
+
+
+def test_series_length_is_never_computed():
+    """series_length 是不安全的：打到第 5 局意味着知道了前 4 局是 2-2，
+    而那在第 1 局的 BP 时点未知。features/series_ctx.py 不得产出它。"""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "src" / "lolwp" / "features" / "series_ctx.py")
+    if not src.exists():
+        pytest.skip("无 series_ctx 模块")
+
+    from lolwp.features.loader import load_dev
+    from lolwp.features.series_ctx import build
+    d = load_dev(min_tier=1, since="2025-01-01").head(2000)
+    f = build(d)
+    assert "series_length" not in f.columns
+    assert not any("length" in c for c in f.columns)
