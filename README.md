@@ -157,7 +157,8 @@ make install-cron    # 备选：cron 版
 
 | 文件 | 内容 |
 |---|---|
-| `docs/PLAN.md` | 开发手册 v1.2，4,487 行 |
+| **`docs/WORKFLOW.md`** | **工作流手册：日常怎么干、加特征走什么协议、五条会反复咬人的教训** |
+| `docs/PLAN.md` | 开发手册 v1.2，4,487 行，讲「为什么这么设计」 |
 | `reports/final_technical_report.md` | 最终技术报告，含揭盲结果 |
 | `experiments/preregistration.md` | 预注册、三条修订、揭盲记录 |
 | `reports/stage3_power_and_icc.md` | ICC 与功效分析（含一处自我更正） |
