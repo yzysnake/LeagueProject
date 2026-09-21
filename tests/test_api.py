@@ -153,6 +153,44 @@ def test_artifact_version_assertion_exists():
 
 
 @pytest.mark.skipif(not (ROOT / "docker-compose.yml").exists(), reason="无 compose")
+def test_compose_commands_are_single_line():
+    """YAML 折叠标量陷阱：`>` 里**缩进更深的行会保留换行**，把 shell 命令切断。
+
+    [实测 2026-09-21] 我把 `--host 0.0.0.0` 换行并多缩进后，
+    YAML 在那里插了换行，uvicorn 拿不到 --host，**静默退回默认的 127.0.0.1**，
+    容器内 healthcheck 照样过（它走 localhost），但宿主机访问不到。
+    这类 bug 只表现为"端口不通"，很难联想到 YAML 缩进。
+    """
+    import yaml
+    with open(ROOT / "docker-compose.yml") as fh:
+        d = yaml.safe_load(fh)
+    for svc, spec in d["services"].items():
+        cmd = spec.get("command", "")
+        assert "\n" not in cmd.rstrip("\n"), f"{svc} 的 command 被 YAML 切成了多行"
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.yml").exists(), reason="无 compose")
+def test_compose_uv_run_also_skips_dev():
+    """`uv run` 默认会重新同步且**带上 dev 组**，会抵消前一步的 `uv sync --no-dev`。
+
+    [实测] 不给 `uv run` 也加 --no-dev 时，容器里会多装 mypy/ruff/pytest 13 个包。
+    """
+    y = (ROOT / "docker-compose.yml").read_text()
+    for line in y.splitlines():
+        if "uv run" in line:
+            assert "--no-dev" in line, f"这行的 uv run 少了 --no-dev：{line.strip()}"
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.yml").exists(), reason="无 compose")
+def test_compose_api_binds_all_interfaces_inside_container():
+    """容器内必须绑 0.0.0.0（否则宿主机映射不进去），
+    对外暴露则由 ports 的 127.0.0.1 前缀限制。两者不矛盾。"""
+    y = (ROOT / "docker-compose.yml").read_text()
+    assert "--host 0.0.0.0" in y
+    assert "--server.address 0.0.0.0" in y
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.yml").exists(), reason="无 compose")
 def test_compose_enforces_single_worker_and_local_bind():
     """两条硬约束写进 compose：单 worker（内存）与只绑回环（安全）。"""
     y = (ROOT / "docker-compose.yml").read_text()

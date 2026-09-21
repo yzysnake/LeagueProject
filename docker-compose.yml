@@ -19,9 +19,11 @@ services:
     # ★ 必须 --workers 1：artifact 含状态快照（2,070 队 / 10,863 选手 /
     #   113,058 条选手英雄计数），每个 worker 一份，多 worker 内存线性翻倍。
     #   要横向扩就加容器实例，不是加 worker。
+    # ★ `uv run` 默认会重新同步且**带上 dev 组**，会把前一步 `--no-dev` 当场抵消。
+    #   [实测] 不加这个 --no-dev 时容器里会装上 mypy/ruff/pytest（多 13 个包）。
     command: >
       sh -c "uv sync --frozen --no-dev &&
-             uv run uvicorn lolwp.api.main:app --host 0.0.0.0 --port 8000 --workers 1"
+      uv run --no-dev uvicorn lolwp.api.main:app --host 0.0.0.0 --port 8000 --workers 1"
     volumes:
       - ./src:/app/src:ro
       - ./pyproject.toml:/app/pyproject.toml:ro
@@ -42,8 +44,7 @@ services:
     <<: *uv
     command: >
       sh -c "uv sync --frozen --no-dev &&
-             uv run streamlit run src/lolwp/app/main.py
-               --server.address 0.0.0.0 --server.port 8501 --server.headless true"
+      uv run --no-dev streamlit run src/lolwp/app/main.py --server.address 0.0.0.0 --server.port 8501 --server.headless true"
     environment:
       PYTHONPATH: /app/src
       UV_PROJECT_ENVIRONMENT: /app/.venv-docker
@@ -64,7 +65,7 @@ services:
     profiles: ["online"]                # ★ docker compose up 默认不起它
     command: >
       sh -c "uv sync --frozen --no-dev &&
-             uv run python -m lolwp.live.scheduler"
+      uv run --no-dev python -m lolwp.live.scheduler"
     volumes:
       - ./src:/app/src:ro
       - ./pyproject.toml:/app/pyproject.toml:ro
