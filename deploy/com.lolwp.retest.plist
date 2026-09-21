@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.lolwp.retest</string>
+
+  <!-- 为什么用 launchd 而不是 cron 跑年度任务：
+       cron 在机器睡眠时**不会补跑**，错过就得再等一年。
+       launchd 的 StartCalendarInterval 会在唤醒后补跑一次。
+       对每年只跑一次的任务，这个差别是决定性的。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Month</key><integer>1</integer>
+    <key>Day</key><integer>5</integer>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>WorkingDirectory</key><string>__REPO__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/.venv/bin/python</string>
+    <string>scripts/retest.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONPATH</key><string>__REPO__/src</string></dict>
+
+  <key>StandardOutPath</key><string>__REPO__/logs/retest.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/logs/retest.log</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>

@@ -56,7 +56,21 @@ retest:         ## 重测被搁置的假设（协同/克制/比分差/熟练度�
 retest-history: ## 只看台账的历史趋势，不重跑
 	$(PY) scripts/retest.py --history
 
-install-cron:   ## 装一条每年 1 月 5 日的自动重测（数据攒满一整年后）
+install-launchd: ## 【推荐】装 launchd 年度重测：睡眠错过会在唤醒后补跑
+	@mkdir -p logs ~/Library/LaunchAgents
+	@sed 's|__REPO__|$(PWD)|g' deploy/com.lolwp.retest.plist \
+	  > ~/Library/LaunchAgents/com.lolwp.retest.plist
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.retest.plist 2>/dev/null || true
+	@launchctl load ~/Library/LaunchAgents/com.lolwp.retest.plist
+	@echo "已装 launchd（每年 1 月 5 日 09:00，睡眠时唤醒后补跑）："
+	@launchctl list | grep lolwp || echo "  （未列出，检查 plist）"
+
+uninstall-launchd: ## 卸掉 launchd 任务
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.retest.plist 2>/dev/null || true
+	@rm -f ~/Library/LaunchAgents/com.lolwp.retest.plist
+	@echo "已卸载"
+
+install-cron:   ## 装 cron 年度重测（注意：睡眠时不补跑，年度任务建议用 launchd）
 	@line="0 9 5 1 * cd $(PWD) && PYTHONPATH=src .venv/bin/python scripts/retest.py >> logs/retest.log 2>&1"; \
 	( crontab -l 2>/dev/null | grep -v "scripts/retest.py"; echo "$$line" ) | crontab -; \
 	echo "已装 cron："; crontab -l | grep retest

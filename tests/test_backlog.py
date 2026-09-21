@@ -103,6 +103,25 @@ def test_rerun_is_deterministic():
 
 def test_makefile_exposes_retest():
     mk = (ROOT / "Makefile").read_text()
-    for t in ["retest:", "retest-history:", "install-cron:"]:
+    for t in ["retest:", "retest-history:", "install-cron:",
+              "install-launchd:", "uninstall-launchd:"]:
         assert t in mk, f"Makefile 缺 {t}"
     assert "scripts/retest.py" in mk
+
+
+def test_launchd_plist_is_valid_and_annual():
+    """年度任务用 launchd 而不是 cron：**cron 在机器睡眠时不补跑**，
+    错过就得再等一年；launchd 的 StartCalendarInterval 会在唤醒后补跑。
+
+    对每年只跑一次的任务，这个差别是决定性的。
+    """
+    import plistlib
+    p = ROOT / "deploy" / "com.lolwp.retest.plist"
+    assert p.exists(), "缺 launchd plist"
+    d = plistlib.loads(p.read_text().replace("__REPO__", str(ROOT)).encode())
+    assert d["Label"] == "com.lolwp.retest"
+    ci = d["StartCalendarInterval"]
+    assert ci["Month"] == 1 and ci["Day"] == 5, "触发日期变了"
+    assert d["ProgramArguments"][1] == "scripts/retest.py"
+    assert d["EnvironmentVariables"]["PYTHONPATH"].endswith("src")
+    assert d["RunAtLoad"] is False, "RunAtLoad 为真会在每次登录时跑，年度任务不该这样"

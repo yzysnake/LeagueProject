@@ -129,8 +129,13 @@ chemistry / 赛区校准）+ 两层经验贝叶斯的英雄版本强度，外层
 ```bash
 make retest          # 重跑全部，追加进台账
 make retest-history  # 只看历史趋势
-make install-cron    # 装一条每年 1 月 5 日的自动重测
+make install-launchd # 【推荐】装年度自动重测（每年 1 月 5 日）
+make install-cron    # 备选：cron 版
 ```
+
+**年度任务用 launchd 不用 cron**：cron 在机器睡眠时**不补跑**，
+错过就得再等一年；launchd 的 `StartCalendarInterval` 会在唤醒后补跑一次。
+对每年只跑一次的任务，这个差别是决定性的。
 
 当前基线（2026-09-21）：
 
