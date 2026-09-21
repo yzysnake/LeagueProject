@@ -50,6 +50,17 @@ lint:           ## ruff 全仓
 gate:           ## 上线门禁自检：注入退化模型，必须被拒
 	$(PY) scripts/gate_check.py --selftest
 
+retest:         ## 重测被搁置的假设（协同/克制/比分差/熟练度），追加进台账
+	$(PY) scripts/retest.py
+
+retest-history: ## 只看台账的历史趋势，不重跑
+	$(PY) scripts/retest.py --history
+
+install-cron:   ## 装一条每年 1 月 5 日的自动重测（数据攒满一整年后）
+	@line="0 9 5 1 * cd $(PWD) && PYTHONPATH=src .venv/bin/python scripts/retest.py >> logs/retest.log 2>&1"; \
+	( crontab -l 2>/dev/null | grep -v "scripts/retest.py"; echo "$$line" ) | crontab -; \
+	echo "已装 cron："; crontab -l | grep retest
+
 monitor:        ## 滚动漂移监控（阈值由抽样分布推出，不是拍脑袋）
 	$(PY) -c "import warnings; warnings.filterwarnings('ignore'); \
 	import pandas as pd; from lolwp.ops.monitor import rolling_monitor; \
