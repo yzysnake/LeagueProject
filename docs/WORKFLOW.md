@@ -136,6 +136,30 @@ Hypothesis(key=..., title=..., gate=..., threshold=..., why_parked=..., run=...)
 
 ---
 
+## 2.5 实时盯盘与赛后对账
+
+```bash
+make install-watch   # 挂 launchd，崩溃自动重启
+make reconcile       # 随时对账
+make uninstall-watch
+```
+
+盯盘做的事：轮询 `getLive` → 等 livestats 的 204→200 跳变 → 解析阵容 →
+出 **BP 后的正式预测** → 落盘 `reports/live_watch.jsonl`（append-only）。
+
+**一个反直觉的发现**：赛前因为「队伍不在历史数据里」而拒绝预测的场次，
+**赛后往往能预测**。队伍名陌生不代表选手陌生——阵容一出来，
+选手通过 crosswalk 解析成功，再由选手多数表决反推队伍。
+2026-09-23 抓到的 4 局里有 3 局属于这种情况。
+
+**对账的一个 API 陷阱**：`getEventDetails` 的 `games[].teams[]`
+**只有 `id` 和 `side`，没有逐局胜负**。逐局结果只能从系列比分反推：
+
+- Bo1：系列比分就是本局胜负，无歧义
+- 多局系列：单靠 `gameWins` 推不出「第 k 局谁赢」，**必须留空而不是猜**
+
+第一版假设 API 有逐局结果，写出来四条记录全是空值且不报错。
+
 ## 3. 定期任务
 
 ```bash

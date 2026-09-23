@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.lolwp.livewatch</string>
+  <!-- 用 launchd 而不是 nohup：终端会话关掉也不会被杀，
+       崩了会自动重启（KeepAlive），而脚本自身对已记录的局会跳过，天然幂等。 -->
+  <key>WorkingDirectory</key><string>__REPO__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/.venv/bin/python</string>
+    <string>scripts/live_watch.py</string>
+    <string>--hours</string><string>16</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONPATH</key><string>__REPO__/src</string></dict>
+  <key>StandardOutPath</key><string>__REPO__/logs/live_watch.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/logs/live_watch.log</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+</dict>
+</plist>

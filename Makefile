@@ -50,6 +50,25 @@ lint:           ## ruff 全仓
 gate:           ## 上线门禁自检：注入退化模型，必须被拒
 	$(PY) scripts/gate_check.py --selftest
 
+watch:          ## 实时盯盘：抓 BP 后阵容出正式预测，落盘供赛后对账
+	$(PY) scripts/live_watch.py --hours 16
+
+reconcile:      ## 赛后对账：预测 vs 实际，输出命中率 / log loss / Brier
+	$(PY) scripts/live_watch.py --reconcile
+
+install-watch:  ## 把盯盘挂成 launchd（崩溃自动重启，关终端不影响）
+	@mkdir -p logs ~/Library/LaunchAgents
+	@sed 's|__REPO__|$(PWD)|g' deploy/com.lolwp.livewatch.plist \
+	  > ~/Library/LaunchAgents/com.lolwp.livewatch.plist
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.livewatch.plist 2>/dev/null || true
+	@launchctl load ~/Library/LaunchAgents/com.lolwp.livewatch.plist
+	@echo "盯盘已挂："; launchctl list | grep livewatch
+
+uninstall-watch: ## 停掉盯盘
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.livewatch.plist 2>/dev/null || true
+	@rm -f ~/Library/LaunchAgents/com.lolwp.livewatch.plist
+	@echo "已停"
+
 retest:         ## 重测被搁置的假设（协同/克制/比分差/熟练度），追加进台账
 	$(PY) scripts/retest.py
 
