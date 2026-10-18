@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 LEDGER = "reports/live_watch.jsonl"
 API = "https://esports-api.lolesports.com/persisted/gw"
+FEED = "https://feed.lolesports.com/livestats/v1"
 KEY = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
 
 
@@ -48,15 +49,76 @@ def _seen_games() -> set[str]:
     return out
 
 
-def reconcile() -> None:
-    """拉赛程结果，与已记录的预测对账。"""
-    import requests
+def _ts(t: datetime) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+
+def _feed_blue_won(s, gid: str) -> bool | None:
+    """从 livestats window 的终局帧判胜负。
+
+    推掉水晶必须先推掉至少一座水晶塔（inhibitor），所以 gameState=finished 那一帧里
+    **恰好一方 inhibitors>0** 时胜方无歧义。双方都>0 或都为 0（投降）→ 返回 None，不猜。
+    window 每次只返回 ~10 秒的帧，从首帧起每 5 分钟往后跳，直到找到 finished 帧。
+    """
+    from datetime import timedelta
+
+    r = s.get(f"{FEED}/window/{gid}", timeout=20)
+    if r.status_code != 200 or not r.content:
+        return None
+    frames = r.json().get("frames") or []
+    if not frames:
+        return None
+    t0 = datetime.fromisoformat(frames[0]["rfc460Timestamp"].replace("Z", "+00:00"))
+    t0 = t0.replace(second=t0.second // 10 * 10, microsecond=0)  # startingTime 须是 10 秒整
+    for mins in range(5, 125, 5):
+        r = s.get(f"{FEED}/window/{gid}", params={"startingTime": _ts(t0 + timedelta(minutes=mins))},
+                  timeout=20)
+        frames = (r.json().get("frames") or []) if r.status_code == 200 and r.content else []
+        if not frames:
+            return None
+        fin = next((f for f in frames if f.get("gameState") == "finished"), None)
+        if fin:
+            b = (fin.get("blueTeam") or {}).get("inhibitors") or 0
+            rd = (fin.get("redTeam") or {}).get("inhibitors") or 0
+            if (b > 0) != (rd > 0):
+                return b > 0
+            return None
+    return None
+
+
+def _series_winner_id(games: list, teams: list) -> str | None:
+    """系列已打完时返回胜方 team id，否则 None。"""
+    if any(g.get("state") not in ("completed", "unneeded") for g in games):
+        return None
+    w = {t["id"]: ((t.get("result") or {}).get("gameWins") or 0) for t in teams}
+    if len(w) != 2:
+        return None
+    (a, x), (b, y) = w.items()
+    return a if x > y else b if y > x else None
+
+
+def _series_blue_won(gm: dict, games: list, teams: list) -> bool | None:
+    """仅凭系列比分能确定的逐局胜负：系列最后一局 = 系列胜方；零封时每局都是胜方。"""
+    win_id = _series_winner_id(games, teams)
+    if win_id is None:
+        return None
+    blue_id = next((t.get("id") for t in gm.get("teams") or [] if t.get("side") == "blue"), None)
+    if blue_id is None:
+        return None
+    done = [g for g in games if g.get("state") == "completed"]
+    loser_wins = next(((t.get("result") or {}).get("gameWins") or 0
+                       for t in teams if t["id"] != win_id), 0)
+    is_last = bool(done) and max(done, key=lambda g: g.get("number") or 0).get("id") == gm.get("id")
+    if is_last or loser_wins == 0:
+        return blue_id == win_id
+    return None
+
+
+def _load_ledger() -> tuple[dict, dict]:
+    """返回 (预测 by game_id, 最新一条结果 by game_id)。结果可能被重对账追加多次，取最后一条。"""
+    preds, results = {}, {}
     if not os.path.exists(LEDGER):
-        print("尚无预测记录")
-        return
-    preds = {}
-    done = set()
+        return preds, results
     with open(LEDGER) as fh:
         for line in fh:
             if not line.strip():
@@ -65,14 +127,25 @@ def reconcile() -> None:
             if r.get("kind") == "prediction":
                 preds[r["game_id"]] = r
             elif r.get("kind") == "result":
-                done.add(r["game_id"])
+                results[r["game_id"]] = r
+    return preds, results
+
+
+def reconcile() -> None:
+    """拉赛程结果，与已记录的预测对账。"""
+    import requests
+
+    preds, results = _load_ledger()
     if not preds:
         print("尚无预测记录")
         return
+    # 只有判出胜负的才算对完；blue_won=None 的旧记录会重试（ledger 仍 append-only）
+    done = {g for g, r in results.items() if r.get("blue_won") is not None}
 
     s = requests.Session()
     s.headers.update({"x-api-key": KEY, "User-Agent": "lolwp/1.0"})
-    n_new = 0
+    events: dict[str, dict] = {}
+    n_new = n_pending = 0
     for gid, p in preds.items():
         if gid in done:
             continue
@@ -80,50 +153,50 @@ def reconcile() -> None:
         if not mid:
             continue
         try:
-            d = s.get(f"{API}/getEventDetails", params={"hl": "en-US", "id": mid},
-                      timeout=20).json()
-            ev = (d.get("data") or {}).get("event") or {}
+            if mid not in events:
+                d = s.get(f"{API}/getEventDetails", params={"hl": "en-US", "id": mid},
+                          timeout=20).json()
+                events[mid] = (d.get("data") or {}).get("event") or {}
+            ev = events[mid]
             games = ((ev.get("match") or {}).get("games") or [])
             gm = next((x for x in games if str(x.get("id")) == gid), None)
             if not gm or gm.get("state") != "completed":
+                n_pending += 1
                 continue
             # ⚠️ getEventDetails 的 games[].teams[] **只有 id 和 side，没有逐局胜负**。
-            #    逐局结果得从系列比分反推：
-            #    · Bo1：系列比分就是本局胜负，无歧义
-            #    · 多局系列：单靠 gameWins 推不出「第 k 局谁赢」，标记为待定
+            #    两路独立来源：livestats 终局帧（_feed_blue_won）与系列比分（_series_blue_won），
+            #    都有答案却打架 → 留空，不猜。
             teams = (ev.get("match") or {}).get("teams") or []
-            winner = next((t.get("name") for t in teams
-                           if (t.get("result") or {}).get("outcome") == "win"), None)
+            by_feed = _feed_blue_won(s, gid)
+            by_series = _series_blue_won(gm, games, teams)
+            if by_feed is not None and by_series is not None and by_feed != by_series:
+                print(f"  {gid} 终局帧与系列比分矛盾，留空", file=sys.stderr)
+                blue_won, source = None, "conflict"
+            elif by_feed is not None:
+                blue_won, source = by_feed, "feed+series" if by_series is not None else "feed"
+            else:
+                blue_won, source = by_series, "series" if by_series is not None else None
+            if blue_won is None and gid in results:
+                n_pending += 1
+                continue  # 仍判不出，不重复追加空记录
             gteams = gm.get("teams") or []
-            blue_id = next((t.get("id") for t in gteams if t.get("side") == "blue"), None)
-            score = {t["id"]: ((t.get("result") or {}).get("gameWins") or 0) for t in teams}
-            blue_won = None
-            if len(games) == 1 and blue_id in score:
-                other = [v for k, v in score.items() if k != blue_id]
-                if other:
-                    blue_won = score[blue_id] > other[0]
-                    if winner is None:
-                        winner = next((t.get("name") for t in teams
-                                       if t["id"] == (blue_id if blue_won else
-                                                      next(k for k in score if k != blue_id))),
-                                      None)
+            side_id = {t.get("side"): t.get("id") for t in gteams}
+            win_id = None if blue_won is None else side_id.get("blue" if blue_won else "red")
+            winner = next((t.get("name") for t in teams if t["id"] == win_id), None)
             _append({"kind": "result", "game_id": gid, "recorded_at": _now(),
-                     "match_winner": winner, "blue_won": blue_won,
+                     "game_winner": winner, "blue_won": blue_won, "source": source,
                      "p_blue": p.get("p_blue"), "teams": p.get("teams")})
             n_new += 1
+            if blue_won is None:
+                n_pending += 1
         except Exception as e:  # noqa: BLE001
             print(f"  对账 {gid} 失败：{type(e).__name__}: {e}", file=sys.stderr)
-    print(f"新对账 {n_new} 条")
+    print(f"新对账 {n_new} 条，仍待定 {n_pending} 条")
 
     # 汇总
-    rows = []
-    with open(LEDGER) as fh:
-        for line in fh:
-            if line.strip():
-                r = json.loads(line)
-                if r.get("kind") == "result" and r.get("blue_won") is not None \
-                        and r.get("p_blue") is not None:
-                    rows.append(r)
+    _, results = _load_ledger()
+    rows = [r for r in results.values()
+            if r.get("blue_won") is not None and r.get("p_blue") is not None]
     if not rows:
         print("尚无可对账的完赛记录")
         return
