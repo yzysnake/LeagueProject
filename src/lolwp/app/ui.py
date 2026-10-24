@@ -40,6 +40,8 @@ _CSS = """
 :root { %VARS% }
 /* 承载这份样式的容器本身不占位（见 inject()） */
 [data-testid="stElementContainer"]:has(.lw-css-mark), .stElementContainer:has(.lw-css-mark) { display: none; }
+/* 开场动画的脚本元素：遮罩画在 document.body 上，它自己的容器不占位 */
+[data-testid="stElementContainer"]:has(.lw-intro-mark), .stElementContainer:has(.lw-intro-mark) { display: none; }
 /* ── Streamlit 外壳 ─────────────────────────────────────────── */
 .stApp { background: radial-gradient(1200px 600px at 12% -8%, var(--lw-blue-soft), transparent 60%),
                      radial-gradient(1000px 520px at 92% -12%, var(--lw-red-soft), transparent 60%),
@@ -55,7 +57,7 @@ header[data-testid="stHeader"] { background: color-mix(in srgb, var(--lw-bg) 82%
 [data-testid="stExpander"] details { background: var(--lw-surface); border-radius: 14px; }
 [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"] > .lw-card-mark) { padding: 0; }
 .stDataFrame { border-radius: 12px; overflow: hidden; }
-/* 关键容器：.st-key-<key> 是 Streamlit 给带 key 的容器加的稳定 class */
+/* 关键容器：st-key-{key} 是 Streamlit 给带 key 的容器加的稳定 class */
 .st-key-lw_panel, .st-key-lw_panel_2, .st-key-lw_filters { background: var(--lw-surface);
   border: 1px solid var(--lw-border); border-radius: 16px; padding: 16px 18px; box-shadow: var(--lw-shadow); }
 
@@ -221,15 +223,21 @@ def palette() -> dict[str, str]:
 def inject() -> None:
     """全局样式。每次脚本运行调用一次（main.py 在 pg.run() 之前）。
 
-    ⚠️ 两条实测踩过的路（都不报错，只是页面全无样式）：
+    ⚠️ 三条实测踩过的路（都不报错）：
     - st.html 只传 <style> → 被送进 event 容器，在 st.navigation 的多页应用里根本没进 DOM；
-    - st.html 带别的元素 → 走 DOMPurify（USE_PROFILES html），<style> 标签被整个剥掉。
-    能用的是 markdown 的原始 HTML 块（<style> 开头的块按 CommonMark 原样保留）。
+    - st.html 默认走 DOMPurify（USE_PROFILES html），<style> 标签被整个剥掉；
+    - st.markdown 的原始 HTML 块能保留 <style>，但 markdown 渲染器是懒加载的，样式比页面上
+      其它 st.html 晚 80 ms 左右才生效，首屏先闪一下无样式的页面。
+    所以走 st.html(unsafe_allow_javascript=True)：这条路径的白名单额外放行 <style>，
+    而且和页面上其它 st.html 是同一个渲染器、同一批渲染。内容是写死的常量 CSS，没有脚本。
+    ⚠️ CSS 正文（含注释）里不能出现「< 后跟字母、/ 或 !」：DOMPurify 的 mXSS 防护见到这种
+    文本会把整个 <style> 删掉（实测：注释里写了一句 .st-key-<key>，全站样式就没了）。
+    tests/test_app_catalog.py 守着这一条。
     再带一个标记元素，让这份 CSS 把自己所在的那个空容器隐藏掉，不占版面。
     """
     pal = palette()
     css = _CSS.replace("%VARS%", " ".join(f"--lw-{k}: {v};" for k, v in pal.items()))
-    st.markdown(f'<style>{css}</style>\n\n<span class="lw-css-mark"></span>', unsafe_allow_html=True)
+    st.html(f'<style>{css}</style><span class="lw-css-mark"></span>', unsafe_allow_javascript=True)
 
 
 def esc(x: Any) -> str:

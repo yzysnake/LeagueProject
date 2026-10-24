@@ -7,6 +7,8 @@
   历史回看   拿真实比赛复盘，对照模型预测与实际结果
   模型说明   模型卡：怎么算的、准到什么程度、哪里别全信
 
+打开站点时先放一段 1–2 秒的开场动画（app/intro.py），它同时就是首轮载入的加载页。
+
 **完全离线可用**（阶段 5 验收①）：英雄图标、队标在 build 时落到 frontend/public/，
 模型与状态全在 models/prod.json 里，运行时零外部请求。
 实时读取当前比赛是增强功能，不是这一层的依赖：实时页挂了，其余页面照常。
@@ -20,7 +22,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from lolwp.app import data, ui
+from lolwp.app import data, intro, ui
 
 HERE = Path(__file__).parent
 ASSETS = HERE / "assets"
@@ -41,6 +43,7 @@ def main() -> None:
     ui.inject()
     # 不给 icon_image：没有侧栏时 Streamlit 会一直显示 icon_image，字标就没机会出现
     st.logo(str(ASSETS / ("logo_light.svg" if ui.is_light() else "logo_dark.svg")), size="large")
+    intro.intro()          # 开场动画：每个浏览器会话只放一次，放完把徽记交给上面这个字标
     pages = [st.Page(path, title=title, icon=icon, default=i == 0)
              for i, (path, title, icon) in enumerate(PAGES)]
     pg = st.navigation(pages, position="top")

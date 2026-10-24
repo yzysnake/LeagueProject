@@ -55,8 +55,10 @@ def _run(poller_obj, page=None):
 
 
 def _html(at) -> str:
-    """页面上所有 st.html 的内容（对阵卡、提示条、页脚都是 HTML）。"""
-    return "\n".join(e.proto.body for e in at.get("html"))
+    """页面上所有 st.html 的内容（对阵卡、提示条、页脚都是 HTML）。
+    不含全局样式与开场脚本：那两段里有所有 class 名，留着的话「页面上有 lw-matchup」恒为真。"""
+    return "\n".join(e.proto.body for e in at.get("html")
+                     if not e.proto.body.lstrip().startswith(("<style", "<script")))
 
 
 def _footer(at) -> bool:
