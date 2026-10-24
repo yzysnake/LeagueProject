@@ -1,0 +1,45 @@
+# 站点主题与服务配置。`make app` / `streamlit run` 在仓库根目录启动时自动读取；
+# docker compose 的 web 容器把本目录挂到 /app/.streamlit。
+
+[server]
+# 和 API 一样只绑本地回环，不对外暴露（docker compose 的 web 容器用 --server.address 0.0.0.0 覆盖，
+# 再由 compose 映射到宿主机的 127.0.0.1）
+address = "127.0.0.1"
+# 英雄图标与队标经 /app/static/... 提供：src/lolwp/app/static 是指向 frontend/public 的软链。
+# Streamlit 会拒绝「静态目录里指向目录外」的软链，但静态目录本身是软链时以其真实路径为根，所以可行。
+enableStaticServing = true
+
+[browser]
+# 离线可用（阶段 5 验收①）：运行时不向任何外部地址发请求，包括 Streamlit 自己的统计
+gatherUsageStats = false
+
+[client]
+# 产品形态：右上角不显示 Deploy / Rerun / Clear cache。开发时要用它们：
+#   streamlit run src/lolwp/app/main.py --client.toolbarMode developer
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#D7B46A"
+backgroundColor = "#0B1019"
+secondaryBackgroundColor = "#141B29"
+textColor = "#E6EAF2"
+borderColor = "#232D40"
+linkColor = "#E3C27E"
+font = "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif"
+codeFont = "'SF Mono', Menlo, Consolas, monospace"
+baseFontSize = 15
+baseRadius = "0.65rem"
+buttonRadius = "0.55rem"
+showWidgetBorder = true
+metricValueFontSize = "1.85rem"
+headingFontWeights = [700, 700, 650, 600, 600, 600]
+dataframeHeaderBackgroundColor = "#111827"
+blueColor = "#4F8CFF"
+redColor = "#FF5C61"
+greenColor = "#34D399"
+orangeColor = "#F2A33A"
+yellowColor = "#E8C15F"
+violetColor = "#A78BFA"
+chartCategoricalColors = ["#4F8CFF", "#FF5C61", "#D7B46A", "#34D399", "#A78BFA", "#F2A33A", "#38BDF8"]

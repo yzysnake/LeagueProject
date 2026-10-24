@@ -32,21 +32,13 @@ from lolwp.api.schemas import (
     PredictRequest,
     PredictResponse,
 )
+from lolwp.app.predict import FEATURE_LABELS as LABELS  # 站点与 API 共用一份展示名
 
 ART_PATH = os.environ.get("LOLWP_ARTIFACT", "models/prod.json")
 CMAP_PATH = "data/ddragon/champion_map.json"
 SILVER = "data/silver/games.parquet"
 RUN_ID = uuid.uuid4().hex[:12]
 
-LABELS = {
-    "side_prior": "蓝方基准（按赛区收缩）",
-    "bt_player_diff": "选手实力差（分层 BT）",
-    "bt_chem_diff": "队伍配合残差",
-    "bt_league_diff": "赛区强度差",
-    "champ_meta_diff": "英雄版本强度差",
-    "team_elo_diff": "队伍 Elo 差",
-    "player_elo_diff": "选手 Elo 差",
-}
 # 实测的高自信段校准（reports/stage8_comparison.md）
 _EXTREME = [(0.95, 0.9255), (0.90, 0.9286), (0.85, 0.8880)]
 

@@ -55,7 +55,8 @@ services:
       - ./uv.lock:/app/uv.lock:ro
       - ./data:/app/data:ro
       - ./models:/app/models:ro
-      - ./frontend:/app/frontend:ro
+      - ./frontend:/app/frontend:ro       # 英雄图标与队标；src/lolwp/app/static 软链到这里
+      - ./.streamlit:/app/.streamlit:ro   # 主题与静态服务（server.enableStaticServing）
     ports: ["127.0.0.1:8501:8501"]
     depends_on:
       api: {condition: service_healthy}

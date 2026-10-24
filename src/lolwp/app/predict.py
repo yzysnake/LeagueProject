@@ -20,6 +20,17 @@ from lolwp.features.priors import features_from_state
 from lolwp.models.artifact import LAYER_OF, Artifact
 from lolwp.models.hier_bt import HierBTSnapshot
 
+# 特征的展示名。站点与 API（/predict 的 contributions[].label）共用这一份。
+FEATURE_LABELS = {
+    "side_prior": "蓝方基准（按赛区收缩）",
+    "bt_player_diff": "选手实力差（分层 BT）",
+    "bt_chem_diff": "队伍配合残差",
+    "bt_league_diff": "赛区强度差",
+    "champ_meta_diff": "英雄版本强度差",
+    "team_elo_diff": "队伍 Elo 差",
+    "player_elo_diff": "选手 Elo 差",
+}
+
 
 @dataclass
 class Draft:

@@ -18,6 +18,7 @@ import requests
 
 VERSIONS_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
 CHAMPION_URL = "https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/champion.json"
+CHAMPION_ZH_URL = "https://ddragon.leagueoflegends.com/cdn/{ver}/data/zh_CN/champion.json"
 UA = "lolwp/1.0 (qxing@uchicago.edu)"
 OUT_DIR = "data/ddragon"
 
@@ -78,11 +79,37 @@ def sync(out_dir: str = OUT_DIR) -> dict[str, Any]:
     return payload
 
 
+def sync_zh(out_dir: str = OUT_DIR) -> dict[str, Any]:
+    """中文名（站点展示用），**钉在 champion_map.json 的同一版本**，不追最新版。
+
+    追最新版会让中文表和图标、映射表错开版本，新英雄有名字没图标。
+    zh_CN 里 `name` 是称号（"离群之刺"）、`title` 才是名字（"阿卡丽"），和 en_US 正好反过来。
+    这是可选的展示数据：文件不在时站点退回英文名，任何模型路径都不读它。
+    """
+    ver = load(out_dir)["version"]
+    r = requests.get(CHAMPION_ZH_URL.format(ver=ver), headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    zh = {dd_id: {"name": c["title"], "epithet": c["name"], "tags": c.get("tags") or []}
+          for dd_id, c in r.json()["data"].items()}
+    payload = {"version": ver, "champions": zh}
+    path = os.path.join(out_dir, "champion_zh.json")
+    with open(path + ".tmp", "w") as fh:
+        json.dump(payload, fh, indent=1, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+    return payload
+
+
 def load(out_dir: str = OUT_DIR) -> dict[str, Any]:
     with open(os.path.join(out_dir, "champion_map.json")) as fh:
         return json.load(fh)
 
 
 if __name__ == "__main__":
-    p = sync()
-    print(f"Data Dragon {p['version']}：{p['n_champions']} 个英雄 → {OUT_DIR}/champion_map.json")
+    import sys
+
+    if sys.argv[1:] == ["zh"]:
+        z = sync_zh()
+        print(f"Data Dragon {z['version']} 中文名：{len(z['champions'])} 个 → {OUT_DIR}/champion_zh.json")
+    else:
+        p = sync()
+        print(f"Data Dragon {p['version']}：{p['n_champions']} 个英雄 → {OUT_DIR}/champion_map.json")
