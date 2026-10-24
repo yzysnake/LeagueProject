@@ -70,16 +70,24 @@ class Artifact:
         return Artifact(**d)
 
 
-def train(out: str = f"{ARTIFACT_DIR}/prod.json") -> Artifact:
+def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Artifact:
+    """训练并打包生产模型。
+
+    scope="all"（默认）：holdout 揭盲之后的生产口径，用全部数据（预注册修订 A4）；
+    scope="dev"：只用 holdout 之前的数据，即揭盲时评测的那个模型（复现用）。
+    两种口径的特征、超参、外层模型完全一样，只差训练数据的截止时间。
+    """
     from sklearn.linear_model import LogisticRegression
 
     from lolwp.features.draft_priors import run_draft_state_machine
-    from lolwp.features.loader import load_dev
+    from lolwp.features.loader import load_all, load_dev
     from lolwp.features.priors import run_state_machine
     from lolwp.models.bt_cache import rolling_ratings_cached
     from lolwp.models.hier_bt import HierBTConfig
 
-    full = load_dev()
+    if scope not in ("all", "dev"):
+        raise ValueError(f"scope 只能是 all / dev，收到 {scope!r}")
+    full = load_all() if scope == "all" else load_dev()
     f1, st1 = run_state_machine(full, return_state=True)
     f2, st2 = run_draft_state_machine(full, return_state=True)
     cfg_bt = HierBTConfig(refit_every_days=3)
@@ -117,6 +125,11 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json") -> Artifact:
             "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场（reports/stage8_comparison.md）",
             "holdout_log_loss": 0.61653,
             "holdout_note": "final holdout 989 场，一次性揭盲于 git 437d1cb（reports/final_technical_report.md §7）",
+            # 训练口径。oos / holdout 两个数字只对 dev 口径的模型成立；all 口径在 holdout 期是样本内
+            "data_scope": scope,
+            **({"refit_note": "揭盲后的生产重训（预注册修订 A4）：同一模型规格、全量数据。"
+                              "上面两个 log loss 是 dev 口径模型的成绩，本模型的样本外成绩看盯盘台账。"}
+               if scope == "all" else {}),
         },
     )
     art.save(out)
@@ -124,7 +137,12 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json") -> Artifact:
 
 
 if __name__ == "__main__":
-    a = train()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--scope", choices=["all", "dev"], default="all",
+                    help="all = 揭盲后的生产口径（全量数据）；dev = 揭盲时评测的那个模型")
+    a = train(scope=ap.parse_args().scope)
     print(f"artifact → {ARTIFACT_DIR}/prod.json")
     print(json.dumps(a.meta, ensure_ascii=False, indent=2))
     print("系数:", {k: round(v, 4) for k, v in a.coef.items()}, "截距", round(a.intercept, 4))

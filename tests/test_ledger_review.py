@@ -145,3 +145,12 @@ def test_backfilled_games_count_as_late_and_carry_their_kickoff(tmp_path):
     df = load_review(_write(tmp_path, [bf])).set_index("game_id")
     assert bool(df.loc["bf", "late"]) and bool(df.loc["bf", "backfill"])
     assert str(df.loc["bf", "game_time"])[:16] == "2026-10-15 18:16"
+
+
+def test_model_provenance_defaults_to_the_only_model_before_refits(tmp_path):
+    """2026-10-24 之前的记录没有 model 字段——那时只有训练至 5/31 的那一个模型。"""
+    from lolwp.live.ledger import LEGACY_MODEL
+    rows = [_pred("old", 0.6, ["X", "Y"], "X", "Y"),
+            dict(_pred("new", 0.6, ["X", "Y"], "X", "Y"), model="BT4_LR@2026-10-23")]
+    df = load_review(_write(tmp_path, rows)).set_index("game_id")
+    assert df.loc["old", "model"] == LEGACY_MODEL and df.loc["new", "model"] == "BT4_LR@2026-10-23"

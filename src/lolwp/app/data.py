@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any
 
 import pandas as pd
@@ -40,7 +41,37 @@ def _read_json(path: str) -> Any:
 
 @st.cache_resource
 def artifact() -> Artifact:
+    _seen[ART] = os.path.getmtime(ART)
     return Artifact.load(ART)
+
+
+# 每个已加载的 lolwp 模块对象（与 artifact）第一次被看到时的文件修改时间。按模块对象记：
+# 万一 Streamlit 自己重载了某个模块，那是个新对象，不算过时
+_seen: dict[object, float] = {}
+
+
+def stale() -> list[str]:
+    """站点进程里已经过时的东西：加载之后磁盘上又改过的 lolwp 模块、模型文件与比赛数据（silver）。
+
+    Streamlit 每次运行都重读页面脚本（views/*.py），但 import 过的库模块和缓存的 artifact
+    留在进程里不动。改了代码不重启，就是「新页面 + 旧模块」：缺列报 KeyError，
+    或者悄悄用着旧模型（2026-10-24 实测两样都撞上了）。页面顶上据此提示重启。
+    """
+    out = []
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if not (name.startswith("lolwp.") and f):
+            continue
+        try:
+            m = os.path.getmtime(f)
+        except OSError:
+            continue
+        if _seen.setdefault((name, id(mod)), m) != m:
+            out.append(name)
+    for path, label in ((ART, "模型"), (SILVER, "比赛数据")):
+        if path in _seen and os.path.exists(path) and os.path.getmtime(path) != _seen[path]:
+            out.append(f"{label} {path}")
+    return out
 
 
 @st.cache_resource
@@ -54,6 +85,7 @@ def bt_snapshot():
 @st.cache_data(show_spinner=False)
 def games() -> pd.DataFrame:
     """tier≥1（含国际赛）全部比赛，新的在前。"""
+    _seen[SILVER] = os.path.getmtime(SILVER)
     g = pd.read_parquet(SILVER)
     return g[g.league_tier >= 1].sort_values("kickoff_utc", ascending=False)
 

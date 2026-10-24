@@ -260,9 +260,13 @@ def reconcile() -> None:
     print()
 
 
-def _record(g: dict, pr: dict, **extra) -> dict:
-    """台账里的一条预测。实时捕获与赛后补录共用，两边字段必须一模一样。"""
-    return {"kind": "prediction", "game_id": str(g.get("game_id")),
+def _record(g: dict, pr: dict, model: str | None = None, **extra) -> dict:
+    """台账里的一条预测。实时捕获与赛后补录共用，两边字段必须一模一样。
+
+    model = 算这条预测的 artifact（「BT4_LR@训练截止日」）。生产模型会重训，
+    不记下来的话，台账里新旧模型的预测就混在一起分不开了。
+    """
+    return {"kind": "prediction", "game_id": str(g.get("game_id")), "model": model,
             "match_id": g.get("match_id"), "recorded_at": _now(),
             "league": g.get("league"), "teams": g.get("teams"),
             "p_blue": pr.get("p_blue"), "layers": pr.get("layers"),
@@ -271,6 +275,11 @@ def _record(g: dict, pr: dict, **extra) -> dict:
             "blue_names": pr.get("blue_names"), "red_names": pr.get("red_names"),
             "warnings": g.get("warnings"),
             "latency_200_to_pred_s": g.get("latency_200_to_pred_s"), **extra}
+
+
+def _model_id(pol) -> str | None:
+    meta = getattr(getattr(pol, "artifact", None), "meta", None) or {}
+    return f"{meta.get('model', '?')}@{str(meta.get('trained_on', '?'))[:10]}" if meta else None
 
 
 def _schedule(s, since: datetime) -> list[dict]:
@@ -372,7 +381,7 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
                     continue
                 g = {"game_id": gid, "match_id": mid, "league": name, "teams": codes,
                      "warnings": warns, "latency_200_to_pred_s": None}
-                _append(_record(g, pr, source="backfill", started_at=started))
+                _append(_record(g, pr, _model_id(pol), source="backfill", started_at=started))
                 seen.add(gid)
                 n += 1
                 print(f"[{_now()}] 补录 {name} {' vs '.join(codes or ['?', '?'])}"
@@ -417,7 +426,7 @@ def watch(hours: float) -> int:
         print(f"轮询器构建失败：{type(e).__name__}: {e}", file=sys.stderr)
         return 1
     seen = _seen_games()
-    print(f"[{_now()}] 开始盯盘 {hours:.1f} 小时，已记录 {len(seen)} 局", flush=True)
+    print(f"[{_now()}] 开始盯盘 {hours:.1f} 小时，已记录 {len(seen)} 局，模型 {_model_id(pol)}", flush=True)
     s = _session()
     # 启动先补一次：launchd 重启、或上一轮结束到这一轮开始之间打完的局。
     # 只在补录成功后清空：赛程接口一时拿不到就下一圈重来。
@@ -437,7 +446,7 @@ def watch(hours: float) -> int:
                 seen |= _seen_games()   # 补录可能由另一个进程（make backfill）刚写过
                 if gid in seen:
                     continue
-                _append(_record(g, pr))
+                _append(_record(g, pr, _model_id(pol)))
                 seen.add(gid)
                 print(f"[{_now()}] 捕获 {g.get('league')} "
                       f"{' vs '.join(g.get('teams') or ['?','?'])} → 蓝方 {pr['p_blue']:.1%}",

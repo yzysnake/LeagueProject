@@ -13,6 +13,8 @@
 - 同一局可能有多条 result（判不出 → 之后重对账补上；补蓝红方与时间），取最后一条。
 - `source: "backfill"` 的预测是盯盘停摆 / 机器睡眠时整局错过、事后从赛程补出来的
   （scripts/live_watch.py --backfill）：一律算「赛后补录」，开局时间在对账前就有（started_at）。
+- `model` 是算这条预测的 artifact（「BT4_LR@训练截止日」，2026-10-24 起才记）。在那之前落盘的
+  预测全部出自训练截至 2026-05-31 的那一个模型，没有这个字段的按它算（LEGACY_MODEL）。
 - 台账由另一个进程追加，单行可能损坏（磁盘写满、手改）。坏行跳过并计数（df.attrs），
   不能让一行坏数据把整页带崩。
 """
@@ -26,7 +28,8 @@ from collections import Counter
 import pandas as pd
 
 LEDGER = "reports/live_watch.jsonl"
-COLUMNS = ["game_time", "recorded_at", "started_at", "ended_at", "late", "backfill", "game_id",
+LEGACY_MODEL = "BT4_LR@2026-05-31"
+COLUMNS = ["game_time", "recorded_at", "started_at", "ended_at", "late", "backfill", "model", "game_id",
            "match_id", "league", "blue", "red", "p_blue", "blue_won", "status", "hit"]
 
 
@@ -111,6 +114,7 @@ def load_review(path: str = LEDGER) -> pd.DataFrame:
         rows.append({
             "game_time": start if pd.notna(start) else rec, "recorded_at": rec,
             "started_at": start, "ended_at": end, "late": late, "backfill": backfill,
+            "model": p.get("model") or LEGACY_MODEL,
             "game_id": str(gid), "match_id": p.get("match_id"), "league": p.get("league") or "?",
             "blue": blue, "red": red, "p_blue": pb, "blue_won": bw,
             "status": "待定" if hit is None else ("命中" if hit else "未中"), "hit": hit,

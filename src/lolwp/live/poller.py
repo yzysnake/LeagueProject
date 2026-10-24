@@ -556,16 +556,17 @@ def _meta_hash(payload: dict[str, Any]) -> str:
 def build_default_poller(artifact_path: str = "models/prod.json") -> Poller:
     """生产用的装配：加载 artifact、装好降级评分、建好解析器。
 
-    `install_fallback_ratings` 喂的是 `load_dev()` 而不是 silver 全量——
-    **serving 路径也绝不能碰 holdout**，而且 artifact 本身就是 dev 段训的，
-    两边 as-of 必须对齐。
+    `install_fallback_ratings` 喂的数据必须和 artifact **同一口径**，两边 as-of 才对齐：
+    dev 口径的 artifact 配 load_dev()（serving 也不碰 holdout）；揭盲后全量重训的
+    artifact（meta.data_scope == "all"，预注册修订 A4）配 load_all()。
     """
-    from lolwp.features.loader import load_dev
+    from lolwp.features.loader import load_all, load_dev
     from lolwp.live.resolve import install_fallback_ratings
     from lolwp.models.artifact import Artifact
 
     art = Artifact.load(artifact_path)
-    install_fallback_ratings(art.prior_state, load_dev())
+    games = load_all() if art.meta.get("data_scope") == "all" else load_dev()
+    install_fallback_ratings(art.prior_state, games)
     return Poller(LolEsports(), Resolver.load(), art)
 
 

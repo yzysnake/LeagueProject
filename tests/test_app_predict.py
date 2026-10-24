@@ -139,5 +139,12 @@ def test_artifact_is_self_describing(art):
         assert k in art.meta
 
 
-def test_artifact_trained_before_holdout(art):
-    assert pd.Timestamp(art.meta["trained_on"]) < pd.Timestamp(art.meta["holdout_start"])
+def test_artifact_scope_respects_the_holdout(art):
+    """dev 口径：训练截止必须早于 holdout 起点。全量口径（揭盲后的生产重训，修订 A4）：
+    必须有揭盲记录，且元数据写明两个历史成绩不属于这个模型。"""
+    if art.meta.get("data_scope", "dev") == "dev":
+        assert pd.Timestamp(art.meta["trained_on"]) < pd.Timestamp(art.meta["holdout_start"])
+    else:
+        assert art.meta["data_scope"] == "all"
+        assert os.path.exists("reports/final_holdout_result.json"), "揭盲之前不许用全量数据训生产模型"
+        assert "refit_note" in art.meta

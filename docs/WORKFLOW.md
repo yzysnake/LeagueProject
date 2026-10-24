@@ -34,12 +34,16 @@ CatBoost 显著更差，DeepSet 加不动，分组 L2 与普通 L2 无差别，�
 ## 1. 日常循环
 
 ```bash
-make data        # 拉 OE 年度 CSV + 五重校验（幂等，无更新自动跳过）
+make data        # 拉 OE 年度 CSV + 五重校验（当年文件每次重下，内容没变不替换）
 make bronze      # CSV → Parquet，物理丢弃 135 个赛后统计列
 make silver      # 12 行折叠成 1 行 + 赛区归一 + series_id + patch + crosswalk
 make artifact    # 训练打包（约 40 分钟，分层 BT 要全量拟合）
 make app         # 起站点
 ```
+
+`make data` 撞上 Drive 配额时（HTTP 200 + 配额错误页，存成 `*.quota`）会保留旧文件、整体失败，
+隔几个小时再跑即可。**2026-10-24 之前它其实从不刷新**：脚本「已存在就跳过」，而 OE 每天更新的是
+Drive 上同一个文件，数据就一直停在 9/18。
 
 改完任何东西，**固定三步**：
 
@@ -244,6 +248,18 @@ ECE 有系统性正偏且随样本缩小而增大（全样本 0.0105 的模型�
 预注册已有三条修订（A1/A2/A3），每条都留了「作出时尚无模型训练 / 无 holdout 评估」的证据。
 **修订本身不可耻，藏着改才可耻。**
 
+**揭盲之后（修订 A4，2026-10-24）**：生产模型改用全量数据重训——模型规格不动，只把训练截止
+从 5/31 延到最新。分工如下，别混：
+
+| 用途 | 数据入口 | 说明 |
+|---|---|---|
+| 生产模型与它的推理端 | `load_all()` | 揭盲记录不在时拒绝；`make artifact` 默认就是它 |
+| 一切评测（walk-forward、门禁、重测） | `load_dev()` | 只看 holdout 之前，数字与揭盲前可比 |
+| 复现揭盲时评测的模型 | `python -m lolwp.models.artifact --scope dev` | |
+
+holdout 的 0.61653 只属于 dev 口径（训练截至 5/31）的模型。**全量模型在 holdout 期是样本内的**，
+它的样本外成绩只看盯盘台账里训练截止日之后的预测（每条记录的 `model` 字段）。
+
 ---
 
 ## 5. 五条会反复咬人的教训
@@ -261,6 +277,7 @@ ECE 有系统性正偏且随样本缩小而增大（全样本 0.0105 的模型�
 | `uv run` | 默认重新同步且**带 dev 组**，抵消前一步的 `uv sync --no-dev` |
 | YAML 折叠标量 | 缩进更深的行保留换行，把 shell 命令切断，uvicorn 静默绑到默认网卡 |
 | cron | 机器睡眠时**不补跑**，年度任务错过要等一年 |
+| OE 的 `WLDs` | 混着各赛区的**世界赛资格赛**（LPL 每年、LCK 2022–2024，共 98 场），选「全球总决赛」会看到 9 月的 TES vs IG；silver 按「主赛事之前、两队同赛区」归回所属赛区 |
 
 应对只有一个：**每发现一个就钉成测试**。
 
@@ -321,6 +338,7 @@ ECE 有系统性正偏且随样本缩小而增大（全样本 0.0105 的模型�
 | 换个英雄看概率变化 | `make app` → what-if（173 个英雄 3 ms） |
 | 试一个新特征 | 走第 2 节的六步协议 |
 | 换生产模型 | 改 `models/artifact.py::PROD_FEATURES` → `make artifact` → `make gate` |
+| 用最新数据重训生产模型 | `make data bronze silver artifact`（约 40 分钟）→ `make install-watch` 让盯盘换上新模型、重启站点 |
 | 查模型现在什么状态 | `curl localhost:8000/health`（`make api` 先起） |
 | 回滚 | `models/leaderboard.jsonl` 查履历，换 artifact 重启，`/health` 的 `run_id` 会变 |
 | 确认数据没被改过 | `make reproduce`，核对 7 项归档数字 |

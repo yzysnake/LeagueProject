@@ -199,3 +199,22 @@ def test_layer_cards_match_the_waterfall_and_add_up():
     h = ui.waterfall(0.16, [(f"{n}层", "", lay[n]) for n in ui.LAYER_ORDER])
     for n in ui.LAYER_ORDER:
         assert f"{steps[n]:+.1f} pp" in h
+
+
+def test_stale_detects_modules_and_model_changed_after_loading(monkeypatch):
+    """改了库模块或重训了模型而站点没重启：要能看出来（页面据此提示重启）。
+    在第一次被看到之后才改过的才算；之后才 import 的新模块不算。"""
+    from lolwp.app import data
+    mtimes = {}
+    monkeypatch.setattr(data.os.path, "getmtime", lambda f: mtimes.get(f, 1.0))
+    monkeypatch.setattr(data, "_seen", {})
+    assert data.stale() == []
+    mod = next(m for n, m in data.sys.modules.items() if n == "lolwp.app.catalog")
+    mtimes[mod.__file__] = 2.0                              # 加载之后改过
+    data._seen[data.ART] = 1.0
+    monkeypatch.setattr(data.os.path, "exists", lambda f: True)
+    mtimes[data.ART] = 3.0                                  # 模型重训过
+    assert set(data.stale()) == {"lolwp.app.catalog", "模型 " + data.ART}
+    data._seen[data.SILVER] = 1.0
+    mtimes[data.SILVER] = 4.0                               # silver 重建过
+    assert "比赛数据 " + data.SILVER in data.stale()

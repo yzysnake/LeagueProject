@@ -136,6 +136,22 @@ def test_holdout_loader_is_guarded():
 
 
 @needs_data
+def test_full_data_loader_only_after_the_reveal(monkeypatch, tmp_path):
+    """load_all()（生产重训的全量入口，修订 A4）：揭盲记录不在就拒绝——揭盲之前用它就是泄漏。
+    揭盲之后它和 load_dev() 的差别恰好是 holdout 期的比赛。"""
+    from lolwp.features import loader
+    monkeypatch.setattr(loader, "REVEAL_RECORD", str(tmp_path / "nope.json"))
+    with pytest.raises(RuntimeError, match="尚未揭盲"):
+        loader.load_all()
+    monkeypatch.undo()
+    if not loader.holdout_revealed():
+        pytest.skip("本仓库尚未揭盲")
+    full, dev = loader.load_all(), loader.load_dev()
+    extra = full[full.kickoff_utc >= loader.holdout_start()]
+    assert len(full) == len(dev) + len(extra) and full.kickoff_utc.is_monotonic_increasing
+
+
+@needs_data
 def test_folds_meet_acceptance(dev):
     """阶段 3 验收④：≥10 折、OOS ≥3,000 场、无 series 跨界。"""
     cfg = WFConfig()
