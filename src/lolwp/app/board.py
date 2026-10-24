@@ -21,6 +21,7 @@ from typing import Any
 
 import streamlit as st
 
+from lolwp.app import component
 from lolwp.app.catalog import ROLE_CN, ROLES
 
 _CSS = r"""
@@ -326,21 +327,6 @@ export default function (component) {
 """
 
 _NAME = "lolwp_draft_board"
-_component: Callable[..., Any] | None = None
-
-
-def _mount() -> Callable[..., Any]:
-    """组件注册在 Streamlit 的 Runtime 上，不是进程上：AppTest 每个用例起一个新 Runtime，
-    模块级注册只在第一个里有效（之后报「not registered」）。所以挂载前确认当前 Runtime 里有它，
-    没有才注册——同一个 Runtime 里重复注册会刷警告。"""
-    from streamlit.components.v2.get_bidi_component_manager import (
-        get_bidi_component_manager,
-    )
-
-    global _component
-    if _component is None or get_bidi_component_manager().get(_NAME) is None:
-        _component = st.components.v2.component(_NAME, css=_CSS, js=_JS)
-    return _component
 
 
 def board_data(sim: dict[str, Any], champs: dict[str, Any], rosters: dict[str, dict],
@@ -416,5 +402,6 @@ def draft_board(state_key: str, champs: dict[str, Any], rosters: dict[str, dict]
         ev = (st.session_state.get(key) or {}).get("draft")
         apply_event(st.session_state[state_key], ev, keys)
 
-    _mount()(key=key, data=board_data(st.session_state[state_key], champs, rosters, team_info),
-             on_draft_change=_on_draft, height="content")
+    component.get(_NAME, css=_CSS, js=_JS)(
+        key=key, data=board_data(st.session_state[state_key], champs, rosters, team_info),
+        on_draft_change=_on_draft, height="content")

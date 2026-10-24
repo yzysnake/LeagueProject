@@ -38,7 +38,9 @@ def _board(at) -> dict:
 
 
 def _html(at) -> str:
-    return "\n".join(e.proto.body for e in at.get("html"))
+    """不含全局样式与开场脚本（那两段里有所有 class 名）。"""
+    return "\n".join(e.proto.body for e in at.get("html")
+                     if not e.proto.body.lstrip().startswith(("<style", "<script")))
 
 
 def _p_blue(at) -> str:
