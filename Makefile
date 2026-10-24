@@ -18,7 +18,9 @@ bronze:         ## CSV → Parquet，物理丢弃 135 个赛后统计列
 silver:         ## 折叠为一场一行 + 赛区归一 + series_id + patch + crosswalk
 	$(PY) -m lolwp.store.silver
 
-icons:          ## 下载 173 张英雄图标供离线使用
+icons:          ## 下载 173 张英雄图标、中文名与现役战队队标，供离线使用
+	$(PY) -m lolwp.ingest.ddragon zh
+	$(PY) -m lolwp.ingest.team_logos
 	$(PY) -c "import json,os,requests; \
 	cm=json.load(open('data/ddragon/champion_map.json')); v=cm['version']; \
 	os.makedirs(f'frontend/public/dd/{v}',exist_ok=True); \
@@ -55,6 +57,9 @@ watch:          ## 实时盯盘：抓 BP 后阵容出正式预测，落盘供赛
 
 reconcile:      ## 赛后对账：预测 vs 实际，输出命中率 / log loss / Brier
 	$(PY) scripts/live_watch.py --reconcile
+
+backfill:       ## 赛后补录盯盘错过的局（停摆 / 合盖睡眠），可选 DAYS=14 LEAGUE=Worlds
+	$(PY) scripts/live_watch.py --backfill --days $(or $(DAYS),14) $(if $(LEAGUE),--league "$(LEAGUE)")
 
 install-watch:  ## 把盯盘挂成 launchd（崩溃自动重启，关终端不影响）
 	@mkdir -p logs ~/Library/LaunchAgents

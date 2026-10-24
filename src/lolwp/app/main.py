@@ -1,362 +1,54 @@
-"""本地 Streamlit 站点：摆阵容 → 出胜率 → 看 what-if。
+"""本地 Streamlit 站点入口：顶部导航 + 六个页面（各自一个文件，在 views/ 下）。
 
-三个 tab：
-  1. 阵容模拟   手动选队伍/选手/英雄，出胜率与分层分解
-  2. what-if   换任一位置的英雄，看概率怎么变
-  3. 历史回看   拿真实比赛复盘，对照模型预测与实际结果
+  阵容模拟   选赛事和两支队，点头像选英雄、按位置筛、换替补，出胜率与三层构成
+  What-if    把任一位置换成别的英雄，看概率怎么变
+  实时比赛   自动发现正在进行的比赛并出预测
+  近期战绩   盯盘落盘的预测 vs 赛后结果，可按时间段 / 赛事筛，标出赛后补录的局
+  历史回看   拿真实比赛复盘，对照模型预测与实际结果
+  模型说明   模型卡：怎么算的、准到什么程度、哪里别全信
 
-**完全离线可用**（阶段 5 验收①）：英雄图标已 build 时落到 frontend/public/dd/，
+**完全离线可用**（阶段 5 验收①）：英雄图标、队标在 build 时落到 frontend/public/，
 模型与状态全在 models/prod.json 里，运行时零外部请求。
-实时读取当前比赛是阶段 6 的增强功能，不是这一层的依赖。
+实时读取当前比赛是增强功能，不是这一层的依赖：实时页挂了，其余页面照常。
+
+页面之间互不依赖：每次交互只重跑当前页（旧版五个 tab 在同一个脚本里，
+在任何一页点一下都会把五页全算一遍，包括历史回看的几百次预测）。
 """
 from __future__ import annotations
 
-import json
-import os
+from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
-from lolwp.app.predict import Draft, predict, whatif_swap
-from lolwp.features.draft_priors import ROLES
-from lolwp.models.artifact import Artifact
+from lolwp.app import data, ui
 
-ART = "models/prod.json"
-CMAP = "data/ddragon/champion_map.json"
-# 设了 LOLWP_API 就走 HTTP（docker compose 的 web 容器），否则进程内直算。
-# 两条路径**共用 app.predict 的同一套函数**，不会 skew。
-API_BASE = os.environ.get("LOLWP_API", "").rstrip("/")
-SILVER = "data/silver/games.parquet"
-ROLE_CN = {"top": "上单", "jng": "打野", "mid": "中单", "bot": "ADC", "sup": "辅助"}
+HERE = Path(__file__).parent
+ASSETS = HERE / "assets"
 
-
-@st.cache_resource
-def _art() -> Artifact:
-    return Artifact.load(ART)
-
-
-def _api_alive() -> bool:
-    """API 可达才走 HTTP；不可达自动退回进程内直算，不让用户看到 500。"""
-    if not API_BASE:
-        return False
-    try:
-        import requests
-        return requests.get(f"{API_BASE}/health", timeout=3).status_code == 200
-    except Exception:  # noqa: BLE001
-        return False
-
-
-@st.cache_resource
-def _champs() -> dict:
-    with open(CMAP) as fh:
-        cm = json.load(fh)
-    return {
-        "version": cm["version"],
-        "by_name": {c["name"]: c for c in cm["champions"]},
-        "by_key": {c["dd_key"]: c for c in cm["champions"]},
-        "names": sorted(c["name"] for c in cm["champions"]),
-    }
-
-
-@st.cache_resource
-def _poller():
-    """轮询器做成 cache_resource，才能跨 Streamlit rerun 保持 watchlist 与计时状态。
-
-    构建失败（网络不通、crosswalk 缺失）时返回 None，实时 tab 整体降级为提示，
-    **手动摆阵容不受任何影响**——实时是增强功能不是依赖。
-    """
-    try:
-        from lolwp.live.poller import build_default_poller
-        return build_default_poller()
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
-@st.cache_data
-def _games() -> pd.DataFrame:
-    g = pd.read_parquet(SILVER)
-    return g[g.league_tier >= 1].sort_values("kickoff_utc", ascending=False)
-
-
-def _icon(dd_id: str, version: str) -> str | None:
-    p = f"frontend/public/dd/{version}/{dd_id}.png"
-    return p if os.path.exists(p) else None
-
-
-# 极端段的实测校准（样本外 23,060 场，reports/stage8_comparison.md）。
-# 模型在高概率端系统性过度自信，必须在 UI 上诚实表达（§5.6.4）。
-_EXTREME_BUCKETS = [
-    (0.95, 94, 0.9685, 0.9255),
-    (0.90, 308, 0.9363, 0.9286),
-    (0.85, 750, 0.8993, 0.8880),
+PAGES = [
+    ("views/simulate.py", "阵容模拟", ":material/stadia_controller:"),
+    ("views/whatif.py", "What-if", ":material/swap_horiz:"),
+    ("views/live.py", "实时比赛", ":material/sensors:"),
+    ("views/review.py", "近期战绩", ":material/insights:"),
+    ("views/history.py", "历史回看", ":material/history:"),
+    ("views/about.py", "模型说明", ":material/info:"),
 ]
 
 
-def _prob_bar(p: float, warns: list[str]) -> None:
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        st.progress(p, text=f"蓝方胜率 {p:.1%}　｜　红方 {1 - p:.1%}")
-    with c2:
-        st.metric("蓝方胜率", f"{p:.1%}")
-    hi = max(p, 1 - p)
-    for lo, n, mean_pred, actual in _EXTREME_BUCKETS:
-        if hi >= lo:
-            st.info(
-                f"这个概率落在模型的高自信段。历史上模型给出 ≥{lo:.0%} 的 {n} 场比赛里，"
-                f"平均预测 {mean_pred:.1%} 而**实际胜率只有 {actual:.1%}**——"
-                f"高自信段是系统性过度自信的，请按 {actual:.0%} 左右理解。",
-                icon="📉",
-            )
-            break
-    for w in warns:
-        st.warning(w, icon="⚠️")
-
-
-def _layers(pred) -> None:
-    st.caption(
-        "把 logit 拆成三层分别看。**实力层通常占绝大部分**——这不是模型偷懒，"
-        "是职业赛的真实结构：队伍与选手实力约占可解释信号的 87%，"
-        "整个 BP 阶段的可测量贡献只有 ΔlogLoss ≈ 0.002（见 reports/stage4_baseline_ladder.md）。"
-    )
-    cols = st.columns(3)
-    for col, layer in zip(cols, ["实力", "阵容", "赛况"]):
-        v = pred.layers.get(layer, 0.0)
-        col.metric(f"{layer}层", f"{v:+.3f}", help="对 logit 的贡献，正值利好蓝方")
-    with st.expander("逐项贡献"):
-        df = pd.DataFrame(
-            [{"特征": k, "贡献(logit)": round(v, 4), "原始值": round(pred.features[k], 4)}
-             for k, v in sorted(pred.contributions.items(), key=lambda x: -abs(x[1]))]
-        )
-        st.dataframe(df, hide_index=True, width="stretch")
-        st.caption(f"Σ贡献 + 截距 = {pred.logit:+.6f} = logit(p)，闭合误差 0")
-
-
-def _pick_side(label: str, champs: dict, key: str, default: list[str] | None = None) -> list[int]:
-    st.markdown(f"**{label}**")
-    keys = []
-    cols = st.columns(5)
-    for i, (col, role) in enumerate(zip(cols, ROLES)):
-        with col:
-            d = default[i] if default and i < len(default) else champs["names"][0]
-            idx = champs["names"].index(d) if d in champs["names"] else 0
-            n = st.selectbox(ROLE_CN[role], champs["names"], index=idx, key=f"{key}_{role}")
-            c = champs["by_name"][n]
-            p = _icon(c["dd_id"], champs["version"])
-            if p:
-                st.image(p, width=48)
-            keys.append(c["dd_key"])
-    return keys
-
-
-def tab_simulate(art: Artifact, champs: dict, games: pd.DataFrame) -> None:
-    st.subheader("阵容模拟")
-    leagues = sorted(games.league_canon.unique())
-    lg = st.selectbox("赛区", leagues, index=leagues.index("LCK") if "LCK" in leagues else 0)
-    sub = games[games.league_canon == lg]
-    teams = sorted(set(sub.blue_team_name.dropna()) | set(sub.red_team_name.dropna()))
-    if len(teams) < 2:
-        st.error("该赛区队伍不足")
-        return
-    c1, c2 = st.columns(2)
-    bt = c1.selectbox("蓝方战队", teams, index=0)
-    rt = c2.selectbox("红方战队", teams, index=1)
-
-    def roster(name: str) -> tuple[str, list[str]]:
-        m = sub[(sub.blue_team_name == name)]
-        if len(m):
-            r = m.iloc[0]
-            return r.blue_team_id, list(r.blue_player_ids)
-        m = sub[(sub.red_team_name == name)]
-        if len(m):
-            r = m.iloc[0]
-            return r.red_team_id, list(r.red_player_ids)
-        return "", [""] * 5
-
-    btid, bpl = roster(bt)
-    rtid, rpl = roster(rt)
-    st.caption("选手默认取该队最近一场的首发。")
-
-    bk = _pick_side("蓝方阵容", champs, "sim_b")
-    rk = _pick_side("红方阵容", champs, "sim_r")
-
-    d = Draft(lg, btid, rtid, bpl, rpl, bk, rk)
-    pred = predict(art, d)
-    st.divider()
-    _prob_bar(pred.p_blue, pred.warnings)
-    _layers(pred)
-    st.session_state["draft"] = d
-
-
-def tab_whatif(art: Artifact, champs: dict) -> None:
-    st.subheader("what-if：换一个英雄会怎样")
-    d = st.session_state.get("draft")
-    if d is None:
-        st.info("先到「阵容模拟」页摆一套阵容。")
-        return
-    c1, c2 = st.columns(2)
-    side = c1.radio("换哪一边", ["blue", "red"], format_func=lambda s: "蓝方" if s == "blue" else "红方",
-                    horizontal=True)
-    role = c2.selectbox("换哪个位置", ROLES, format_func=lambda r: ROLE_CN[r])
-    slot = ROLES.index(role)
-
-    wi = whatif_swap(art, d, side, slot, [c["dd_key"] for c in champs["by_key"].values()])
-    wi["英雄"] = wi.champ_key.map(lambda k: champs["by_key"][int(k)]["name"])
-    base = wi.attrs["base_p"]
-    st.caption(f"当前阵容蓝方胜率 {base:.2%}。下表是把该位置换成各英雄后的变化。")
-    st.warning(
-        "这是**分布外的相关性外推，不是因果反事实**。队伍只会选自己练过且当前版本能配合的英雄，"
-        "所以模型没见过的组合给出的概率可信度很低。换一个英雄的真实影响量级通常在 ±2pp 以内。",
-        icon="🧭",
-    )
-    c1, c2 = st.columns(2)
-    c1.markdown("**提升最大**")
-    c1.dataframe(wi.head(8)[["英雄", "p_blue", "delta_pp"]].round(4), hide_index=True, width="stretch")
-    c2.markdown("**下降最大**")
-    c2.dataframe(wi.tail(8).iloc[::-1][["英雄", "p_blue", "delta_pp"]].round(4),
-                 hide_index=True, width="stretch")
-    st.bar_chart(wi.set_index("英雄").delta_pp.head(20))
-
-
-def tab_history(art: Artifact, champs: dict, games: pd.DataFrame) -> None:
-    st.subheader("历史回看")
-    n = st.slider("看最近多少场", 20, 500, 100, step=20)
-    recent = games.head(n)
-    rows = []
-    for r in recent.itertuples():
-        d = Draft(r.league_canon, r.blue_team_id, r.red_team_id,
-                  list(r.blue_player_ids), list(r.red_player_ids),
-                  [int(x) for x in r.blue_champ_keys], [int(x) for x in r.red_champ_keys],
-                  now=r.kickoff_utc)
-        p = predict(art, d)
-        rows.append({
-            "日期": str(r.kickoff_utc)[:10], "赛区": r.league_canon,
-            "蓝方": r.blue_team_name, "红方": r.red_team_name,
-            "预测蓝胜": round(p.p_blue, 3), "实际": "蓝胜" if r.y_blue_win else "红胜",
-            "命中": (p.p_blue >= 0.5) == bool(r.y_blue_win),
-        })
-    df = pd.DataFrame(rows)
-    c1, c2 = st.columns(2)
-    c1.metric("命中率", f"{df['命中'].mean():.1%}")
-    c2.metric("样本", f"{len(df)} 场")
-    st.caption(
-        "⚠️ 这里包含 **holdout 期**的比赛，仅供肉眼复盘。"
-        "任何写进报告的指标都必须走 walk-forward，绝不能用这一页的数字。"
-    )
-    st.dataframe(df, hide_index=True, width="stretch")
-
-
-_STATUS_UI = {
-    "ready":       ("✅", "阵容已读取，预测就绪"),
-    "waiting":     ("⏳", "BP 已开始但还没开局读条"),
-    "no_coverage": ("🚫", "该赛事无 livestats 覆盖"),
-    "forbidden":   ("🔒", "接口鉴权失败，已降级"),
-    "error":       ("⚠️", "接口异常，正在重试"),
-    "finished":    ("🏁", "本局已结束"),
-}
-
-
-@st.fragment(run_every="30s")
-def _live_panel(art: Artifact, champs: dict) -> None:
-    """每 30 秒自动刷新一次。轮询间隔由 Poller 自己控制（getLive 60s / window 30s），
-    这里只是触发 tick，不会真的每 30 秒打一次远端。"""
-    pol = _poller()
-    if isinstance(pol, dict):
-        st.error(f"轮询器无法构建：{pol['error']}", icon="🚫")
-        st.info("实时功能不可用不影响「阵容模拟」——那一页完全离线。", icon="💡")
-        return
-    try:
-        pol.tick()
-    except Exception as e:  # noqa: BLE001
-        st.warning(f"本次轮询失败（已保留上次结果）：{type(e).__name__}: {e}", icon="⚠️")
-
-    snap, health = pol.snapshot(), pol.health()
-    c = st.columns(4)
-    c[0].metric("监视中的对局", health["n_watched"])
-    c[1].metric("已出预测", health["by_status"].get("ready", 0))
-    c[2].metric("实体解析率", f"{health['live_resolve_rate']:.0%}")
-    c[3].metric("接口状态", "降级" if health["api_degraded"] else "正常")
-    st.caption(f"最后刷新 {pd.Timestamp.now(tz='UTC').strftime('%H:%M:%S')} UTC　｜　"
-               f"getLive 轮询 {snap['n_live_polls']} 次，window {snap['n_window_polls']} 次")
-
-    games = snap.get("games") or []
-    if not games:
-        st.info("当前没有正在进行的比赛。有比赛开打时这里会自动出现。", icon="😴")
-        return
-
-    for g in games:
-        icon, _ = _STATUS_UI.get(g["status"], ("•", ""))
-        title = f"{icon} {g.get('league','?')}　{' vs '.join(g.get('teams') or ['?','?'])}"
-        with st.expander(title, expanded=(g["status"] == "ready")):
-            st.caption(g.get("message", ""))
-            pred = g.get("prediction")
-            if g["status"] != "ready" or not pred:
-                if g["status"] == "waiting":
-                    st.caption(
-                        "注意：赛程接口标 `inProgress` 时比赛**未必**已开打——"
-                        "它标的是「局间休息 + BP 开始」。唯一权威的开赛信号是 "
-                        "livestats 的 204→200 跳变，本页等的就是它。"
-                    )
-                continue
-            p_blue = pred.get("p_blue")
-            if p_blue is None:
-                st.warning("阵容已读到但概率未产出，请看下方 warnings。")
-            else:
-                _prob_bar(float(p_blue), g.get("warnings") or [])
-                lay = pred.get("layers") or {}
-                if lay:
-                    cc = st.columns(3)
-                    for col, k in zip(cc, ["实力", "阵容", "赛况"]):
-                        col.metric(f"{k}层", f"{lay.get(k, 0.0):+.3f}")
-            rows = []
-            for side, cn in (("blue", "蓝"), ("red", "红")):
-                for role, ck, nm in zip(ROLES, pred.get(f"{side}_champ_keys") or [],
-                                        pred.get(f"{side}_names") or []):
-                    ch = champs["by_key"].get(int(ck)) if ck else None
-                    rows.append({"边": cn, "位置": ROLE_CN[role],
-                                 "英雄": ch["name"] if ch else "?", "选手": nm})
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-            lat = g.get("latency_200_to_pred_s")
-            if lat is not None:
-                st.caption(f"从 livestats 首次 200 到本页出概率：{lat:.3f} 秒")
-
-
-def tab_live(art: Artifact, champs: dict) -> None:
-    st.subheader("实时比赛")
-    st.caption(
-        "自动发现正在进行的职业比赛，读取 BP 结束后的阵容并给出胜率。"
-        "数据来自 Riot 的非官方 livestats 接口，无 SLA，随时可能变；"
-        "**接口不可用时本页降级，不影响其它页面。**"
-    )
-    _live_panel(art, champs)
-
-
 def main() -> None:
-    st.set_page_config(page_title="LoL 职业赛胜率预测", layout="wide")
-    st.title("英雄联盟职业比赛胜率预测")
-    art, champs, games = _art(), _champs(), _games()
-    mode = "经 API" if _api_alive() else "进程内"
-    st.caption(
-        f"推理 {mode}　｜　模型 {art.meta['model']}　｜　训练至 {art.meta['trained_on'][:10]}　｜　"
-        f"{art.meta['n_train_games']:,} 场　｜　walk-forward OOS log loss {art.meta['oos_log_loss']}"
-        f"　｜　英雄数据 Data Dragon {champs['version']}"
-    )
-    t1, t2, t3, t4 = st.tabs(["阵容模拟", "what-if", "实时比赛", "历史回看"])
-    with t1:
-        tab_simulate(art, champs, games)
-    with t2:
-        tab_whatif(art, champs)
-    with t3:
-        tab_live(art, champs)
-    with t4:
-        tab_history(art, champs, games)
-
-    st.divider()
-    st.caption(
-        "本项目并非由 Riot Games 开发，也未获得 Riot Games 认可。"
-        "Riot Games 及其所有相关财产均为 Riot Games, Inc. 的商标或注册商标。　｜　"
-        "比赛数据来自 [Oracle's Elixir](https://oracleselixir.com)，英雄数据来自 Riot Data Dragon。"
-    )
+    st.set_page_config(page_title=f"{ui.BRAND} · {ui.TAGLINE}", page_icon=str(ASSETS / "icon.svg"),
+                       layout="wide", initial_sidebar_state="collapsed")
+    ui.inject()
+    # 不给 icon_image：没有侧栏时 Streamlit 会一直显示 icon_image，字标就没机会出现
+    st.logo(str(ASSETS / ("logo_light.svg" if ui.is_light() else "logo_dark.svg")), size="large")
+    pages = [st.Page(path, title=title, icon=icon, default=i == 0)
+             for i, (path, title, icon) in enumerate(PAGES)]
+    pg = st.navigation(pages, position="top")
+    try:
+        pg.run()
+    finally:
+        # 任何一页内部出错（Streamlit 已就地显示），页脚的免责声明也必须在
+        ui.footer(data.artifact().meta, data.champions()["version"])
 
 
-if __name__ == "__main__":
-    main()
+main()

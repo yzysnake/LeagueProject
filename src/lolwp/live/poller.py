@@ -43,6 +43,18 @@ pre-game 模型就是泄漏，§3.3.2）。不带 startingTime 时 feed 返回�
 
 礼貌：getLive ≥ 60 s，window ≥ 30 s（§7.7.4）。两个节流都在本模块里强制，
 不依赖调用方自觉；`_now`/`_sleep` 可注入，单测因此不需要真的睡 30 秒。
+
+────────────────────────────────────────────────────────────────────────
+时钟用墙钟，不用 time.monotonic
+────────────────────────────────────────────────────────────────────────
+macOS 上 `time.monotonic()` 是 `mach_absolute_time()`，**合盖睡眠时不走**。
+这里的每个时限（getLive 60 秒节流、15 分钟无覆盖、5 分钟宽限、1 小时清理）
+说的都是比赛的真实时间。用 monotonic 时，Mac 合盖后只在每 15 分钟一次、
+每次 2–60 秒的 DarkWake 里醒来，节流器按「醒着的时间」算，常常认为离上次
+getLive 还不到 60 秒而跳过刷新——新开打的局根本进不了 watchlist。
+[实测 2026-10-23] Worlds 瑞士轮 8 局里 KC–AL、LOS–T1、LYON–TSW 三局整局
+都在睡眠期间打完，一局也没抓到；同期 watchlist 里早就有的两局倒是在 DarkWake 里
+被补抓到了（赛后补录）。
 """
 from __future__ import annotations
 
@@ -172,7 +184,7 @@ class Poller:
         artifact: Any | None = None,
         cfg: PollerConfig | None = None,
         *,
-        now: Callable[[], float] = time.monotonic,
+        now: Callable[[], float] = time.time,   # 墙钟：见模块文档「时钟用墙钟」
         sleep: Callable[[float], None] = time.sleep,
         wall_clock: Callable[[], pd.Timestamp] | None = None,
     ) -> None:
@@ -423,36 +435,50 @@ class Poller:
         # 解析与预测放在锁外：它们是纯 CPU，且绝不能让一次解析异常卡住整张表
         self._predict(g, payload)
 
+    def predict_window(
+        self, payload: dict[str, Any], league_name: str | None,
+        now: pd.Timestamp | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """一份 window payload → (预测, warnings)。纯 CPU，不碰轮询状态。
+
+        实时轮询和赛后补录（scripts/live_watch.py --backfill）**共用这一个函数**：
+        两条路径各拼一遍字段，台账里同一种记录就会长出两种形状。
+        now = 预测所站的时刻，只影响英雄强度与熟练度的衰减；补录传开局时间，
+        这样补出来的概率和当时实时算的一样。
+        """
+        rg = self.resolver.resolve_window(payload, feed_league_name=league_name)
+        out: dict[str, Any] = {
+            "esports_game_id": rg.esports_game_id,
+            "league_canon": rg.league_canon,
+            "patch": list(rg.patch) if rg.patch else None,
+            "blue_team": rg.blue.oe_team_id,
+            "red_team": rg.red.oe_team_id,
+            "blue_champ_keys": list(rg.blue.champ_keys),
+            "red_champ_keys": list(rg.red.champ_keys),
+            "blue_names": list(rg.blue.summoner_names),
+            "red_names": list(rg.red.summoner_names),
+            **rg.stats,
+        }
+        if self.artifact is not None:
+            from lolwp.app.predict import predict as _predict_fn
+
+            d = to_draft(rg, self.artifact.prior_state, now=self._wall() if now is None else now)
+            pred = _predict_fn(self.artifact, d)
+            out.update({
+                "p_blue": pred.p_blue,
+                "logit": pred.logit,
+                "layers": pred.layers,
+                "contributions": pred.contributions,
+            })
+            rg.warnings.extend(pred.warnings)
+        return out, list(rg.warnings)
+
     def _predict(self, g: GameState, payload: dict[str, Any]) -> None:
         try:
-            rg = self.resolver.resolve_window(payload, feed_league_name=g.league_name)
-            out: dict[str, Any] = {
-                "esports_game_id": rg.esports_game_id,
-                "league_canon": rg.league_canon,
-                "patch": list(rg.patch) if rg.patch else None,
-                "blue_team": rg.blue.oe_team_id,
-                "red_team": rg.red.oe_team_id,
-                "blue_champ_keys": list(rg.blue.champ_keys),
-                "red_champ_keys": list(rg.red.champ_keys),
-                "blue_names": list(rg.blue.summoner_names),
-                "red_names": list(rg.red.summoner_names),
-                **rg.stats,
-            }
-            if self.artifact is not None:
-                from lolwp.app.predict import predict as _predict_fn
-
-                d = to_draft(rg, self.artifact.prior_state, now=self._wall())
-                pred = _predict_fn(self.artifact, d)
-                out.update({
-                    "p_blue": pred.p_blue,
-                    "logit": pred.logit,
-                    "layers": pred.layers,
-                    "contributions": pred.contributions,
-                })
-                rg.warnings.extend(pred.warnings)
+            out, warns = self.predict_window(payload, g.league_name)
             with self._lock:
                 g.prediction = out
-                g.warnings = list(rg.warnings)
+                g.warnings = warns
                 g.status = GameStatus.READY
                 g.predicted_at = self._now()
                 g.message = "阵容已读取，预测就绪"

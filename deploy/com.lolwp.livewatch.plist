@@ -5,7 +5,10 @@
 <dict>
   <key>Label</key><string>com.lolwp.livewatch</string>
   <!-- 用 launchd 而不是 nohup：终端会话关掉也不会被杀，
-       崩了会自动重启（KeepAlive），而脚本自身对已记录的局会跳过，天然幂等。 -->
+       崩了会自动重启（KeepAlive），而脚本自身对已记录的局会跳过，天然幂等。
+       KeepAlive 必须是无条件 true：脚本每个 hours 窗口结束会正常退出一次（exit 0）并对账，
+       旧配置 SuccessfulExit=false 导致 2026-10-08 盯完一轮就再没起来，漏掉了 Worlds。
+       ThrottleInterval 防止启动即失败时 10 秒一次地空转。 -->
   <key>WorkingDirectory</key><string>__REPO__</string>
   <key>ProgramArguments</key>
   <array>
@@ -18,7 +21,7 @@
   <key>StandardOutPath</key><string>__REPO__/logs/live_watch.log</string>
   <key>StandardErrorPath</key><string>__REPO__/logs/live_watch.log</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key>
-  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>300</integer>
 </dict>
 </plist>
