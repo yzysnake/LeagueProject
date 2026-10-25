@@ -1,9 +1,10 @@
-"""把盯盘台账 reports/live_watch.jsonl 整理成「一局一行」的复盘表。
+"""把盯盘台账 reports/live_watch.jsonl 整理成「一局一行」的复盘表；顺带给实力快照供料。
 
 和站点「历史回看」的区别：那一页是事后拿模型重算历史比赛（含 holdout，只能肉眼看）；
-这里是盯盘读到 BP 后阵容时落盘的预测——只用阵容（feed 的 gameMetadata）和冻结的模型，
+这里是盯盘读到 BP 后阵容时落盘的预测——只用阵容（feed 的 gameMetadata）和当时的模型，
 不读任何赛中数据，是唯一干净的线上成绩。落盘一般在开局后几分钟内，但盯盘休眠 / 断线恢复后
 会补抓，个别局落盘时已经打完（`late`）：概率和开局时算的一样，只是不算严格的实时预测。
+「当时的模型」= 外层系数冻结、实力快照随赛果重解（`models.artifact.refresh`，见 live_games）。
 
 几个坑：
 - `teams` 是赛程里的队伍顺序，**不是蓝红方**（换边后会反过来）。蓝红方优先用对账写进 result
@@ -17,6 +18,8 @@
   预测全部出自训练截至 2026-05-31 的那一个模型，没有这个字段的按它算（LEGACY_MODEL）。
 - 台账由另一个进程追加，单行可能损坏（磁盘写满、手改）。坏行跳过并计数（df.attrs），
   不能让一行坏数据把整页带崩。
+- 对账时会把这一局的阵容解析成 OE 的队伍 / 选手 id 写进 result（`blue_oe_team` …），
+  `live_games` 据此把 OE 还没收录的局拼成和 silver 同形的行，给实力快照重解用。
 """
 from __future__ import annotations
 
@@ -31,6 +34,14 @@ LEDGER = "reports/live_watch.jsonl"
 LEGACY_MODEL = "BT4_LR@2026-05-31"
 COLUMNS = ["game_time", "recorded_at", "started_at", "ended_at", "late", "backfill", "model", "game_id",
            "match_id", "league", "blue", "red", "p_blue", "blue_won", "status", "hit"]
+
+LIVE_PREFIX = "live:"
+# OE 与 feed 记的开赛时间差几分钟；同系列相邻两局开赛至少隔 32 分钟（2019 起 12,707 个系列实测）。
+# 30 分钟的护栏挡得住同一局算两遍，又不会误伤同系列的下一局。
+LIVE_GUARD = pd.Timedelta(minutes=30)
+LIVE_COLUMNS = ["game_id", "kickoff_utc", "ended_utc", "league_canon", "league_tier", "blue_team_id",
+                "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win"]
+_FALLBACK = "fallback:"
 
 
 def _tag(name: object, teams: list[str]) -> str | None:
@@ -73,13 +84,8 @@ def _utc(x: object) -> pd.Timestamp:
     return pd.to_datetime(x, utc=True, errors="coerce") if x else pd.NaT
 
 
-def load_review(path: str = LEDGER) -> pd.DataFrame:
-    """一局一行，按比赛时间从新到旧。status ∈ {命中, 未中, 待定}；待定 = 没结果或结果判不出。
-
-    game_time 是开局时间（对账写入的 started_at；补录的局预测里自带）；
-    两处都没有的局只有落盘时间，就用它。
-    late = 落盘晚于终局（True / False；终局时间未知时 None）；补录的局恒为 True。
-    """
+def _read(path: str) -> tuple[dict, dict, int]:
+    """(预测 by game_id, 最后一条结果 by game_id, 坏行数)。"""
     preds, results, bad = {}, {}, 0
     if os.path.exists(path):
         with open(path) as fh:
@@ -98,6 +104,17 @@ def load_review(path: str = LEDGER) -> pd.DataFrame:
                     preds[r["game_id"]] = r
                 elif r.get("kind") == "result":
                     results[r["game_id"]] = r
+    return preds, results, bad
+
+
+def load_review(path: str = LEDGER) -> pd.DataFrame:
+    """一局一行，按比赛时间从新到旧。status ∈ {命中, 未中, 待定}；待定 = 没结果或结果判不出。
+
+    game_time 是开局时间（对账写入的 started_at；补录的局预测里自带）；
+    两处都没有的局只有落盘时间，就用它。
+    late = 落盘晚于终局（True / False；终局时间未知时 None）；补录的局恒为 True。
+    """
+    preds, results, bad = _read(path)
     rows = []
     for gid, p in preds.items():
         res = results.get(gid) or {}
@@ -126,6 +143,94 @@ def load_review(path: str = LEDGER) -> pd.DataFrame:
     df = df.sort_values(["game_time", "game_id"], ascending=False, ignore_index=True)
     df.attrs["n_bad_lines"] = bad
     return df
+
+
+def _players(res: dict, side: str) -> list[str | None]:
+    """5 个位置的 OE 选手 id，解析不出的位置是 None（快照按该队普通选手计价，和 silver 的缺位一样）。"""
+    ps = list(res.get(f"{side}_oe_players") or [])[:5]
+    ps += [None] * (5 - len(ps))
+    return [p if isinstance(p, str) and p and not p.startswith(_FALLBACK) else None for p in ps]
+
+
+def _team(res: dict, side: str, last_team: dict[str, str]) -> str | None:
+    """对账解析出的 OE 队伍 id。primary 对照直接认；contested 的（同一个 esports 队历史上对过
+    多个 OE 队，例如改名换壳）要阵容作证：至少 3 名解析出的选手在 OE 里最近一年最后效力的就是它。
+    实测 2026 世界赛的 MVK 就是这种：对照可信度 contested，但 5 个人上一场都在这支 OE 队。"""
+    t = res.get(f"{side}_oe_team")
+    if not isinstance(t, str) or not t or t.startswith(_FALLBACK):
+        return None
+    if res.get(f"{side}_team_conf") == "primary":
+        return t
+    return t if sum(last_team.get(p) == t for p in _players(res, side) if p) >= 3 else None
+
+
+def _last_team(silver: pd.DataFrame, days: int = 365) -> dict[str, str]:
+    """选手 → silver 里最近一年最后效力的 OE 队。"""
+    recent = silver[silver.kickoff_utc >= silver.kickoff_utc.max() - pd.Timedelta(days=days)]
+    out: dict[str, str] = {}
+    for side in ("blue", "red"):
+        for t, ps, k in zip(recent[f"{side}_team_id"], recent[f"{side}_player_ids"], recent.kickoff_utc):
+            for p in ps if ps is not None else ():
+                if isinstance(p, str):
+                    out.setdefault(p, (k, t))
+                    if k > out[p][0]:
+                        out[p] = (k, t)
+    return {p: t for p, (_, t) in out.items()}
+
+
+def live_games(silver: pd.DataFrame, path: str = LEDGER) -> pd.DataFrame:
+    """台账里判出胜负、OE 还没收录的局 → 与 silver 同形的行（只含实力快照要用的列）。
+
+    给 `models.artifact.refresh` 重解实力快照用：快照冻结一个月 log loss 就差 0.012
+    （reports/exp_model_improvements.md §1.2），而 OE 会断更（2026-09-18 起 Drive 配额），
+    这时快照只能靠盯盘自己记下的赛果保持新鲜。只收：
+    - 对账时解析出了阵容、两队对照可信的局（primary，或 contested 但阵容作证，见 _team；
+      选手解析不出的位置留 None）；
+    - 胜负判得出（blue_won 是 bool）；
+    - OE 还没有的局：开局晚于 silver 里**该赛区**最后一场 + 30 分钟，且 silver 里没有同一对队伍
+      在前后 30 分钟内开的局（防赛区标签两边不一致时同一局算两遍）。
+
+    game_id 加 `live:` 前缀，和 OE 的 id 不会撞；league_tier 取 silver 里该赛区最近的口径，
+    没见过的赛区按 0（不参与「主场赛区」的推断以外的任何口径）。
+    """
+    preds, results, _ = _read(path)
+    if not results:
+        return pd.DataFrame(columns=LIVE_COLUMNS)
+    last = silver.groupby("league_canon").kickoff_utc.max()
+    tier = silver.groupby("league_canon").league_tier.last()
+    last_team = _last_team(silver) if any(
+        r.get(f"{s}_team_conf") == "contested" for r in results.values() for s in ("blue", "red")) else {}
+    pairs: dict[frozenset, list[pd.Timestamp]] = {}
+    for b, r, t in zip(silver.blue_team_id.astype(str), silver.red_team_id.astype(str),
+                       silver.kickoff_utc):
+        pairs.setdefault(frozenset((b, r)), []).append(t)
+    rows = []
+    for gid, res in results.items():
+        if not isinstance(res.get("blue_won"), bool):
+            continue
+        bt, rt = _team(res, "blue", last_team), _team(res, "red", last_team)
+        if not bt or not rt or bt == rt:
+            continue
+        p = preds.get(gid) or {}
+        start = _utc(res.get("started_at") or p.get("started_at") or p.get("recorded_at"))
+        if pd.isna(start):
+            continue
+        lg = res.get("league_canon") or "UNKNOWN"
+        if lg in last.index and start <= last[lg] + LIVE_GUARD:
+            continue
+        if any(abs(start - t) <= LIVE_GUARD for t in pairs.get(frozenset((bt, rt)), ())):
+            continue
+        rows.append({
+            "game_id": f"{LIVE_PREFIX}{gid}", "kickoff_utc": start, "ended_utc": _utc(res.get("ended_at")),
+            "league_canon": lg, "league_tier": int(tier.get(lg, 0)),
+            "blue_team_id": bt, "red_team_id": rt,
+            "blue_player_ids": _players(res, "blue"), "red_player_ids": _players(res, "red"),
+            "y_blue_win": int(res["blue_won"]),
+        })
+    df = pd.DataFrame(rows, columns=LIVE_COLUMNS)
+    for c in ("kickoff_utc", "ended_utc"):
+        df[c] = pd.to_datetime(df[c], utc=True)
+    return df.sort_values(["kickoff_utc", "game_id"], kind="mergesort", ignore_index=True)
 
 
 def summarize(df: pd.DataFrame) -> dict:

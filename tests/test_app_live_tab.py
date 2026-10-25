@@ -31,7 +31,7 @@ def _clear_poller():
     """只清轮询器的缓存：它在源头打了补丁，跨用例会串味；artifact / 名单等缓存留着省时间。"""
     from lolwp.app import data
 
-    data.poller.clear()
+    data._poller.clear()
 
 
 def _run(poller_obj, page=None):

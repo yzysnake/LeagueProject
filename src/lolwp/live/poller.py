@@ -61,6 +61,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -197,6 +198,10 @@ class Poller:
         # 必须是 tz-aware UTC：draft_features_from_state 要拿它和状态快照的
         # as_of 相减算衰减，naive 与 aware 相减会直接抛 TypeError。
         self._wall = wall_clock or (lambda: pd.Timestamp.now(tz="UTC"))
+
+        # 装载 artifact 的文件与当时的修改时间：文件被换过（每日重解实力快照 / 重训）就重新装载
+        self.artifact_path: str | None = None
+        self.artifact_mtime: float | None = None
 
         self.games: dict[str, GameState] = {}
         self.api_degraded = False
@@ -490,6 +495,24 @@ class Poller:
                 g.message = "阵容解析失败，请手动摆阵容"
                 self._note_error(f"predict {g.game_id}: {e!r}")
 
+    def reload_artifact_if_changed(self) -> bool:
+        """artifact 文件换过（`artifact.refresh` 重解了实力快照、或重训过）就重新装载。返回是否换了。
+
+        已出的预测不重算（同一份阵容只预测一次）；之后开打的局用新快照。
+        """
+        if not self.artifact_path:
+            return False
+        try:
+            m = os.path.getmtime(self.artifact_path)
+        except OSError:
+            return False
+        if m == self.artifact_mtime:
+            return False
+        art = load_serving_artifact(self.artifact_path)
+        with self._lock:
+            self.artifact, self.artifact_mtime = art, m
+        return True
+
     def _note_error(self, msg: str) -> None:
         self.errors.append(msg)
         if len(self.errors) > 50:
@@ -553,8 +576,8 @@ def _meta_hash(payload: dict[str, Any]) -> str:
     ).hexdigest()[:16]
 
 
-def build_default_poller(artifact_path: str = "models/prod.json") -> Poller:
-    """生产用的装配：加载 artifact、装好降级评分、建好解析器。
+def load_serving_artifact(artifact_path: str = "models/prod.json"):
+    """加载 artifact 并装好降级评分。
 
     `install_fallback_ratings` 喂的数据必须和 artifact **同一口径**，两边 as-of 才对齐：
     dev 口径的 artifact 配 load_dev()（serving 也不碰 holdout）；揭盲后全量重训的
@@ -567,7 +590,15 @@ def build_default_poller(artifact_path: str = "models/prod.json") -> Poller:
     art = Artifact.load(artifact_path)
     games = load_all() if art.meta.get("data_scope") == "all" else load_dev()
     install_fallback_ratings(art.prior_state, games)
-    return Poller(LolEsports(), Resolver.load(), art)
+    return art
+
+
+def build_default_poller(artifact_path: str = "models/prod.json") -> Poller:
+    """生产用的装配：加载 artifact、装好降级评分、建好解析器。"""
+    m = os.path.getmtime(artifact_path)
+    pol = Poller(LolEsports(), Resolver.load(), load_serving_artifact(artifact_path))
+    pol.artifact_path, pol.artifact_mtime = artifact_path, m
+    return pol
 
 
 if __name__ == "__main__":  # pragma: no cover

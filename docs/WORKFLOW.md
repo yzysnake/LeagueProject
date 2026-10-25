@@ -45,6 +45,11 @@ make app         # 起站点
 隔几个小时再跑即可。**2026-10-24 之前它其实从不刷新**：脚本「已存在就跳过」，而 OE 每天更新的是
 Drive 上同一个文件，数据就一直停在 9/18。
 
+**实力快照不能等重训**：外层系数长期稳定，但推理用的分层 BT 快照每老一周 log loss 约差 0.004、
+老一个月差 0.012（`reports/exp_model_improvements.md` §1.2）。所以快照单独重解：盯盘每 30 分钟对账一次，
+有新赛果就 `artifact.refresh()`（silver + 台账里 OE 还没收录的局，几秒，外层系数与 `trained_on` 不动），
+站点、API 与盯盘按模型文件的修改时间自动换上。手动：`make refresh`。详见 2.5 节。
+
 改完任何东西，**固定三步**：
 
 ```bash
@@ -206,8 +211,9 @@ Brier 一起翻），两路明明一致也会被误判成矛盾。对账把 feed
 - **盯盘按 1 秒切片睡**（`_nap`）：醒来 1 秒内接着干活，而不是把剩下的半截 `sleep(30)` 睡完；
   一轮间隔超过 2 分钟就判定刚醒，下一圈先实时轮询、再补录睡着时打完的局。
 - **赛后补录**（`make backfill`，盯盘启动与每次醒来也会自动跑）：从 `getSchedule` 找出打完了、台账里没有的局，
-  读 feed 的 BP 后阵容，用同一个冻结模型、**站在开局时刻**补出预测，记录带 `source: "backfill"`。
-  开局早于 artifact 训练截止的局一律不补（那是样本内）。10/24 已补齐 Worlds 25 局。
+  读 feed 的 BP 后阵容，用当前模型、**站在开局时刻**补出预测，记录带 `source: "backfill"`。
+  开局早于实力快照截止（`ratings_cutoff`：快照里最晚一局的终局，没重解过就是训练截止）的局一律不补——
+  补出来的预测会用上它开打之后的赛果。所以盯盘醒来先补录、再对账重解。10/24 已补齐 Worlds 25 局。
 
 ```bash
 make backfill                      # 最近 14 天、全部赛事
@@ -215,8 +221,20 @@ make backfill DAYS=30 LEAGUE=Worlds
 ```
 
 补录只是让台账完整，不改变「严格实时」的口径：「近期战绩」页把它们归入「赛后补录（整局错过）」，
-「排除赛后补录」一键去掉。全部赛事 14 天内还有 54 局可补（DCGI 32、EMEA Masters 9 等），
-要不要补是口径问题，按需 `make backfill`。**真想一局不漏地实时抓，还是得让机器在赛时醒着。**
+「排除赛后补录」一键去掉。**真想一局不漏地实时抓，还是得让机器在赛时醒着。**
+
+**实力快照随赛果重解（2026-10-25 起）**：对账时顺手把这局 BP 后阵容解析成 OE 的队伍 / 选手 id、
+连同终局双方总经济写进 result（`blue_oe_team` / `blue_oe_players` / `blue_gold` …；老结果在下一次对账时补上，
+胜负不动）。`ledger.live_games` 把其中 OE 还没收录的局拼成和 silver 同形的行：两队对照可信
+（primary；contested 的要至少 3 名选手 OE 里最近一年最后效力的就是这支队——2026 世界赛的 MVK 就是这种），
+胜负判得出，开局晚于 silver 里该赛区最后一场 + 30 分钟、且 silver 里没有同一对队伍前后 30 分钟内开的局。
+`artifact.refresh()` 在 silver + 这些局上重解快照（10/25 首次：61 场、1.3 秒，与从零重解差 2e-5），
+写回 `models/prod.json`；外层系数、其余状态、`trained_on` 都不动，meta 里记 `ratings_as_of` /
+`ratings_cutoff` / `n_live_games`，台账每条预测记 `ratings`（当时快照的时刻）。
+
+两条代价，都是刻意的：首次重解之前没补的局（10/25 时其他赛区约 530 局，EMEA Masters、WSCI、DCGI 居多）
+不能再补成预测；它们的赛果对快照仍有用，留作后续（只记赛果、不出预测）。
+状态机（side 先验、英雄版本强度）不跟着台账重解：它们要 patch 与选手英雄计数，变化也慢，跟 `make artifact` 走。
 
 **看成绩**：网站「近期战绩」页（或 `make reconcile` 的汇总）。按比赛日 / 赛事筛，
 可以排除赛后补录；「结果」筛选只筛表格，不影响上面的指标。
@@ -338,7 +356,8 @@ holdout 的 0.61653 只属于 dev 口径（训练截至 5/31）的模型。**全
 | 换个英雄看概率变化 | `make app` → what-if（173 个英雄 3 ms） |
 | 试一个新特征 | 走第 2 节的六步协议 |
 | 换生产模型 | 改 `models/artifact.py::PROD_FEATURES` → `make artifact` → `make gate` |
-| 用最新数据重训生产模型 | `make data bronze silver artifact`（约 40 分钟）→ `make install-watch` 让盯盘换上新模型、重启站点 |
+| 用最新数据重训生产模型 | `make data bronze silver artifact`（约 40 分钟）；盯盘、站点、API 按文件修改时间自动换上，不用重启 |
+| 让实力快照立刻跟上最新赛果 | `make reconcile refresh`（盯盘每 30 分钟会自动做） |
 | 查模型现在什么状态 | `curl localhost:8000/health`（`make api` 先起） |
 | 回滚 | `models/leaderboard.jsonl` 查履历，换 artifact 重启，`/health` 的 `run_id` 会变 |
 | 确认数据没被改过 | `make reproduce`，核对 7 项归档数字 |

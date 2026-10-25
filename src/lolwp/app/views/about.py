@@ -17,6 +17,9 @@ def render() -> None:
                    "BP（ban/pick）结束、开赛前，给出蓝色方的获胜概率。覆盖 tier-1 全部赛区与国际赛事，完全本地运行。",
                    [ui.pill(meta.get("model", "?"), "gold"),
                     ui.pill(f"训练至 {str(meta.get('trained_on'))[:10]}"),
+                    *([ui.pill(ui.ratings_note(meta) + (f"（含盯盘 {meta['n_live_games']} 场）"
+                                                       if meta.get("n_live_games") else ""), "green")]
+                      if ui.ratings_note(meta) else []),
                     *([ui.pill("揭盲后全量重训", "green")] if refit else []),
                     ui.pill(f"{meta.get('n_train_games', 0):,} 场训练")])
 

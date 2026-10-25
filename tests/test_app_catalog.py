@@ -201,9 +201,10 @@ def test_layer_cards_match_the_waterfall_and_add_up():
         assert f"{steps[n]:+.1f} pp" in h
 
 
-def test_stale_detects_modules_and_model_changed_after_loading(monkeypatch):
-    """改了库模块或重训了模型而站点没重启：要能看出来（页面据此提示重启）。
-    在第一次被看到之后才改过的才算；之后才 import 的新模块不算。"""
+def test_stale_detects_modules_and_data_changed_after_loading(monkeypatch):
+    """改了库模块或重建了 silver 而站点没重启：要能看出来（页面据此提示重启）。
+    在第一次被看到之后才改过的才算；之后才 import 的新模块不算。
+    模型文件**不算**：它每有新赛果就重解实力快照，站点按修改时间自动重载（见下一条）。"""
     from lolwp.app import data
     mtimes = {}
     monkeypatch.setattr(data.os.path, "getmtime", lambda f: mtimes.get(f, 1.0))
@@ -211,10 +212,30 @@ def test_stale_detects_modules_and_model_changed_after_loading(monkeypatch):
     assert data.stale() == []
     mod = next(m for n, m in data.sys.modules.items() if n == "lolwp.app.catalog")
     mtimes[mod.__file__] = 2.0                              # 加载之后改过
-    data._seen[data.ART] = 1.0
     monkeypatch.setattr(data.os.path, "exists", lambda f: True)
-    mtimes[data.ART] = 3.0                                  # 模型重训过
-    assert set(data.stale()) == {"lolwp.app.catalog", "模型 " + data.ART}
+    mtimes[data.ART] = 3.0                                  # 实力快照重解过
+    assert set(data.stale()) == {"lolwp.app.catalog"}
     data._seen[data.SILVER] = 1.0
     mtimes[data.SILVER] = 4.0                               # silver 重建过
     assert "比赛数据 " + data.SILVER in data.stale()
+
+
+def test_artifact_reloads_when_the_file_changes(monkeypatch):
+    """盯盘重解实力快照后写回 models/prod.json：站点下一次取 artifact 就是新的，不用重启；
+    文件没变时一直是同一个对象（不重复读 10 MB）。"""
+    from lolwp.app import data
+    mtime = {"v": 1.0}
+    loads = []
+
+    def fake_load(path):
+        loads.append(path)
+        return object()
+    monkeypatch.setattr(data.os.path, "getmtime", lambda f: mtime["v"])
+    monkeypatch.setattr(data.Artifact, "load", staticmethod(fake_load))
+    data._artifact_at.clear()
+    a = data.artifact()
+    assert data.artifact() is a and len(loads) == 1
+    mtime["v"] = 2.0
+    b = data.artifact()
+    assert b is not a and len(loads) == 2
+    data._artifact_at.clear()

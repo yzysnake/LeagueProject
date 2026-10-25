@@ -444,4 +444,16 @@ def footer(meta: dict[str, Any], dd_version: str) -> None:
         '<a href="https://oracleselixir.com" target="_blank">Oracle\'s Elixir</a>，'
         f"英雄数据来自 Riot Data Dragon {esc(dd_version)}，实时阵容来自 lolesports livestats。</div>"
         f'<div style="text-align:right">{esc(BRAND)} · 模型 {esc(meta.get("model"))} · '
-        f'训练至 {esc(str(meta.get("trained_on", ""))[:10])}<br>完全本地运行，离线可用</div></div>')
+        f'训练至 {esc(str(meta.get("trained_on", ""))[:10])}{esc(ratings_note(meta, " · "))}'
+        "<br>完全本地运行，离线可用</div></div>")
+
+
+def ratings_note(meta: dict[str, Any], sep: str = "") -> str:
+    """「实力更新至 …」（纯文本）：实力快照随赛果重解（artifact.refresh），和训练截止不是一回事。
+    快照不比训练截止新就不写。"""
+    import pandas as pd
+
+    t, trained = meta.get("ratings_as_of"), meta.get("trained_on")
+    if not t or not trained or pd.Timestamp(t) <= pd.Timestamp(trained) + pd.Timedelta(minutes=1):
+        return ""
+    return f"{sep}实力更新至 {str(t)[:16]} UTC"
