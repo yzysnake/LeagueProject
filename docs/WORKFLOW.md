@@ -380,6 +380,7 @@ holdout 的 0.61653 只属于 dev 口径（训练截至 5/31）的模型。**全
 | 换生产模型 | 改 `models/artifact.py::PROD_FEATURES` → `make artifact` → `make gate` |
 | 用最新数据重训生产模型 | `make data bronze silver artifact`（约 40 分钟）；盯盘、站点、API 按文件修改时间自动换上，不用重启 |
 | 让实力快照立刻跟上最新赛果 | `make reconcile refresh`（盯盘每 30 分钟会自动做） |
+| 冻结规格的前瞻评估（P3） | `make install-p3` 挂好后自动：11/16 起第一次拿到 9/18 之后的 OE 数据就跑一次；彩排 `make p3-rehearse` |
 | 查模型现在什么状态 | `curl localhost:8000/health`（`make api` 先起） |
 | 回滚 | `models/leaderboard.jsonl` 查履历，换 artifact 重启，`/health` 的 `run_id` 会变 |
 | 确认数据没被改过 | `make reproduce`，核对 7 项归档数字 |
