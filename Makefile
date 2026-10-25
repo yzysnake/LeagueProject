@@ -1,7 +1,7 @@
 PY := PYTHONPATH=src .venv/bin/python
 SNAPSHOT ?= latest
 
-.PHONY: help setup data bronze silver icons artifact refresh app test lint gate monitor reproduce all
+.PHONY: help setup data bronze silver icons artifact refresh app test lint gate monitor reproduce p3 p3-rehearse install-p3 uninstall-p3 all
 
 help:           ## 列出所有命令
 	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -83,6 +83,24 @@ retest:         ## 重测被搁置的假设（协同/克制/比分差/熟练度�
 
 retest-history: ## 只看台账的历史趋势，不重跑
 	$(PY) scripts/retest.py --history
+
+p3:             ## P3 前瞻评估：冻结规格在 9/18 之后比赛上的一次性评估（做过就拒绝；预注册见 preregistration.md）
+	$(PY) scripts/p3_prospective.py
+
+p3-rehearse:    ## P3 彩排：开发期数据、截止挪到 2026-03-31，验证管道，不写记录、不做任何决定
+	$(PY) scripts/p3_prospective.py --rehearse 2026-03-31
+
+install-p3:     ## 装 launchd：每天 10:00 检查 OE 恢复没有，到了预注册的触发条件就跑一次 P3 并弹通知
+	@mkdir -p logs ~/Library/LaunchAgents
+	@sed 's|__REPO__|$(PWD)|g' deploy/com.lolwp.p3.plist > ~/Library/LaunchAgents/com.lolwp.p3.plist
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.p3.plist 2>/dev/null || true
+	@launchctl load ~/Library/LaunchAgents/com.lolwp.p3.plist
+	@echo "P3 触发器已挂："; launchctl list | grep com.lolwp.p3
+
+uninstall-p3:   ## 卸掉 P3 触发器
+	@launchctl unload ~/Library/LaunchAgents/com.lolwp.p3.plist 2>/dev/null || true
+	@rm -f ~/Library/LaunchAgents/com.lolwp.p3.plist
+	@echo "已卸载"
 
 install-launchd: ## 【推荐】装 launchd 年度重测：睡眠错过会在唤醒后补跑
 	@mkdir -p logs ~/Library/LaunchAgents

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.lolwp.p3</string>
+  <!-- P3 前瞻评估的触发器（预注册见 experiments/preregistration.md「P3」）。每天 10:00 跑一次
+       scripts/p3_prospective.py（when-ready 模式）：没到触发日什么都不做；到了就试着拉 OE，拿到 9/18 之后的
+       比赛就重建 bronze / silver / 经济差表、跑一次正式评估、弹桌面通知；做完之后每天直接退出。
+       StartCalendarInterval：机器睡着错过的那次会在唤醒后补跑。卸载：make uninstall-p3 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>10</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>WorkingDirectory</key><string>__REPO__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/.venv/bin/python</string>
+    <string>scripts/p3_prospective.py</string>
+    <string>--when-ready</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONPATH</key><string>__REPO__/src</string></dict>
+  <key>StandardOutPath</key><string>__REPO__/logs/p3.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/logs/p3.log</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>
