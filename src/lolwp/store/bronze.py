@@ -58,7 +58,7 @@ def build(raw_dir: str = RAW_DIR, out_dir: str = BRONZE_DIR) -> pd.DataFrame:
                 "year": year,
                 "raw_cols": len(header),
                 "kept": len(usecols),
-                "dropped_forbidden": len(buckets["forbidden"]),
+                "dropped_forbidden": len(buckets["forbidden"]) + len(buckets["rating_label"]),
                 "rows": len(df),
             }
         )

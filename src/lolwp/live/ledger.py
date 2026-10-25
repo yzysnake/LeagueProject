@@ -14,8 +14,9 @@
 - 同一局可能有多条 result（判不出 → 之后重对账补上；补蓝红方与时间），取最后一条。
 - `source: "backfill"` 的预测是盯盘停摆 / 机器睡眠时整局错过、事后从赛程补出来的
   （scripts/live_watch.py --backfill）：一律算「赛后补录」，开局时间在对账前就有（started_at）。
-- `model` 是算这条预测的 artifact（「BT4_LR@训练截止日」，2026-10-24 起才记）。在那之前落盘的
-  预测全部出自训练截至 2026-05-31 的那一个模型，没有这个字段的按它算（LEGACY_MODEL）。
+- `model` 是算这条预测的 artifact（「规格@训练截止日」，2026-10-24 起才记；实力快照用赛后经济差软标签的
+  规格叫 BT4_LR+MOV，修订 A6）。在那之前落盘的预测全部出自训练截至 2026-05-31 的那一个模型，
+  没有这个字段的按它算（LEGACY_MODEL）。
 - 台账由另一个进程追加，单行可能损坏（磁盘写满、手改）。坏行跳过并计数（df.attrs），
   不能让一行坏数据把整页带崩。
 - 对账时会把这一局的阵容解析成 OE 的队伍 / 选手 id 写进 result（`blue_oe_team` …），
@@ -40,7 +41,7 @@ LIVE_PREFIX = "live:"
 # 30 分钟的护栏挡得住同一局算两遍，又不会误伤同系列的下一局。
 LIVE_GUARD = pd.Timedelta(minutes=30)
 LIVE_COLUMNS = ["game_id", "kickoff_utc", "ended_utc", "league_canon", "league_tier", "blue_team_id",
-                "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win"]
+                "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win", "y_margin"]
 _FALLBACK = "fallback:"
 
 
@@ -152,6 +153,10 @@ def _players(res: dict, side: str) -> list[str | None]:
     return [p if isinstance(p, str) and p and not p.startswith(_FALLBACK) else None for p in ps]
 
 
+def _num(x: object) -> float:
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else float("nan")
+
+
 def _team(res: dict, side: str, last_team: dict[str, str]) -> str | None:
     """对账解析出的 OE 队伍 id。primary 对照直接认；contested 的（同一个 esports 队历史上对过
     多个 OE 队，例如改名换壳）要阵容作证：至少 3 名解析出的选手在 OE 里最近一年最后效力的就是它。
@@ -192,7 +197,11 @@ def live_games(silver: pd.DataFrame, path: str = LEDGER) -> pd.DataFrame:
 
     game_id 加 `live:` 前缀，和 OE 的 id 不会撞；league_tier 取 silver 里该赛区最近的口径，
     没见过的赛区按 0（不参与「主场赛区」的推断以外的任何口径）。
+    y_margin = 赛后经济差软标签（models.margin），终局经济取对账记下的 feed 终局帧，时长 = 终局 − 首帧；
+    缺了就退回胜负，和 silver 一样。
     """
+    from lolwp.models.margin import margin_target
+
     preds, results, _ = _read(path)
     if not results:
         return pd.DataFrame(columns=LIVE_COLUMNS)
@@ -220,12 +229,16 @@ def live_games(silver: pd.DataFrame, path: str = LEDGER) -> pd.DataFrame:
             continue
         if any(abs(start - t) <= LIVE_GUARD for t in pairs.get(frozenset((bt, rt)), ())):
             continue
+        end = _utc(res.get("ended_at"))
+        secs = (end - start).total_seconds() if pd.notna(end) else float("nan")
+        y_margin = margin_target([float(res["blue_won"])], [_num(res.get("blue_gold"))],
+                                 [_num(res.get("red_gold"))], [secs])[0]
         rows.append({
-            "game_id": f"{LIVE_PREFIX}{gid}", "kickoff_utc": start, "ended_utc": _utc(res.get("ended_at")),
+            "game_id": f"{LIVE_PREFIX}{gid}", "kickoff_utc": start, "ended_utc": end,
             "league_canon": lg, "league_tier": int(tier.get(lg, 0)),
             "blue_team_id": bt, "red_team_id": rt,
             "blue_player_ids": _players(res, "blue"), "red_player_ids": _players(res, "red"),
-            "y_blue_win": int(res["blue_won"]),
+            "y_blue_win": int(res["blue_won"]), "y_margin": float(y_margin),
         })
     df = pd.DataFrame(rows, columns=LIVE_COLUMNS)
     for c in ("kickoff_utc", "ended_utc"):

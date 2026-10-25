@@ -20,7 +20,9 @@ def cols():
 
 
 def test_no_forbidden_columns(cols):
-    bad = [c for c in cols if c != "data_snapshot_sha" and classify(c) == "forbidden"]
+    """rating_label（终局经济、时长）同样不许进 bronze：它们只在 data/silver/margins.parquet 里，
+    当历史局的 BT 标签用（修订 A6）。"""
+    bad = [c for c in cols if c != "data_snapshot_sha" and classify(c) in {"forbidden", "rating_label"}]
     assert not bad, f"bronze 里出现了禁用列：{bad}"
 
 

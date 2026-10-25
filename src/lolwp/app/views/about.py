@@ -13,6 +13,7 @@ def render() -> None:
     art, champs = data.artifact(), data.champions()
     meta = art.meta
     refit = meta.get("data_scope") == "all"
+    mov = meta.get("rating_target") == "y_margin"      # 实力快照用赛后经济差软标签训练（修订 A6）
     ui.page_header("Model", "模型说明",
                    "BP（ban/pick）结束、开赛前，给出蓝色方的获胜概率。覆盖 tier-1 全部赛区与国际赛事，完全本地运行。",
                    [ui.pill(meta.get("model", "?"), "gold"),
@@ -21,20 +22,26 @@ def render() -> None:
                                                        if meta.get("n_live_games") else ""), "green")]
                       if ui.ratings_note(meta) else []),
                     *([ui.pill("揭盲后全量重训", "green")] if refit else []),
+                    *([ui.pill("经济差软标签", "green")] if mov else []),
                     ui.pill(f"{meta.get('n_train_games', 0):,} 场训练")])
 
-    # 下面四个成绩都是揭盲时评测的那个模型（训练截至 2026-05-31）的；全量重训的模型在 holdout 期是样本内的
+    # holdout 与准确率是揭盲时评测的那个模型（训练截至 2026-05-31、胜负标签）的；全量重训的模型在 holdout 期是样本内的。
+    # walk-forward 是当前规格在开发期（holdout 之前）的成绩，规格变了它跟着变（meta.oos_log_loss）
     whose = "评测对象是训练截至 2026-05-31 的模型（dev 口径）；当前的全量重训模型在 holdout 期是样本内的。" if refit else ""
     m = st.columns(4)
     m[0].metric("Holdout log loss", "0.6165", help=f"989 场，一次性揭盲（git 437d1cb）。{whose}")
     m[1].metric("Walk-forward log loss", f"{meta.get('oos_log_loss', 0.61917):.4f}",
-                help=f"{meta.get('oos_note')}。{whose}")
+                help=f"{meta.get('oos_note')}。当前规格在开发期（holdout 之前）的成绩。")
     m[2].metric("准确率", "65.3%", help=f"final holdout 989 场。{whose}")
     m[3].metric("对照：Polymarket", "0.6275", help="同期 1,302 场的市场价格；与模型统计上无法区分")
     if refit:
         st.html(ui.note(
-            "当前模型是 holdout 揭盲之后、<b>同一规格用全量数据重训</b>的版本（预注册修订 A4）：上面几个成绩属于揭盲时"
-            "评测的那个训练截至 5/31 的模型；这个模型自己的样本外成绩，看「近期战绩」里它的训练截止日之后落盘的预测。",
+            ("当前模型是 holdout 揭盲之后<b>用全量数据重训</b>的版本（预注册修订 A4），实力快照改用<b>赛后经济差的软标签</b>"
+             "训练（修订 A6）：walk-forward 是这个规格在开发期的成绩；holdout 与准确率属于揭盲时评测的、训练截至 5/31 的"
+             "胜负标签模型。" if mov else
+             "当前模型是 holdout 揭盲之后、<b>同一规格用全量数据重训</b>的版本（预注册修订 A4）：上面几个成绩属于揭盲时"
+             "评测的那个训练截至 5/31 的模型。")
+            + "这个模型自己的样本外成绩，看「近期战绩」里它的训练截止日之后落盘的预测。",
             "info", "ⓘ"))
 
     c1, c2 = st.columns([1.15, 1], gap="large")
@@ -49,7 +56,8 @@ def render() -> None:
             f'<div class="lw-wf-val">{v:.3f}</div></div>' for k, v in rows)
             + f'<div style="color:var(--lw-faint);font-size:.8rem;margin-top:10px">标准化系数；截距 {art.intercept:+.4f}。'
               "外层朴素，复杂度全在特征怎么算出来：分层 Bradley-Terry 选手潜变量 / 配合 / 赛区校准 + 两层经验贝叶斯的英雄版本强度。"
-              "CatBoost、DeepSet、集成都试过，无一在 MDE 之上胜过它。</div></div>")
+              + ("分层 BT 用历史局的终局经济差做软标签：险胜和碾压分开记，本局的赛后统计照旧不进模型。" if mov else "")
+              + "CatBoost、DeepSet、集成都试过，无一在 MDE 之上胜过它。</div></div>")
     with c2:
         ui.section("主要结论是一个负结果", "预注册时就允许为负")
         st.dataframe(pd.DataFrame([

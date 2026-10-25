@@ -354,8 +354,12 @@ class _Design:
     player_team: dict[str, str]
 
 
-def _build_design(win: pd.DataFrame, as_of: pd.Timestamp, cfg: HierBTConfig) -> _Design:
+def _build_design(win: pd.DataFrame, as_of: pd.Timestamp, cfg: HierBTConfig,
+                  target: str = "y_blue_win") -> _Design:
     """列布局：[ r_player | c_team | b0 | m_team ]。l_region 只进先验，不进 A。
+
+    `target` 是似然里的 y 那一列：默认胜负；`y_margin` = 赛后经济差的软标签（models.margin，修订 A6）。
+    似然 Σ w·[log(1+e^η) − y·η] 对 [0,1] 里的软标签照样成立，不用改任何别的东西。
 
     `m_team` 在 A 里的系数是 **(5 − 该场该侧的已知 playerid 数)**，
     对 96.4% 的比赛这个数是 0，于是 m_T 对它们**只出现在先验里**，
@@ -440,7 +444,7 @@ def _build_design(win: pd.DataFrame, as_of: pd.Timestamp, cfg: HierBTConfig) -> 
     player_team = {p: inv_t[int(p_team[j])] for p, j in pid.items()}
     return _Design(
         A=A,
-        y=win.y_blue_win.to_numpy(dtype=float),
+        y=win[target].to_numpy(dtype=float),
         w=w,
         pid=pid,
         tid=tid,
@@ -502,6 +506,8 @@ def fit_snapshot(
     as_of: pd.Timestamp,
     cfg: HierBTConfig | None = None,
     warm: HierBTSnapshot | None = None,
+    *,
+    target: str = "y_blue_win",
 ) -> HierBTSnapshot:
     """在 `[as_of − window_years, as_of)` 上拟合一次分层 BT。
 
@@ -517,7 +523,7 @@ def fit_snapshot(
     if len(win) < cfg.min_games:
         return _empty_snapshot(as_of, cfg, len(win))
 
-    d = _build_design(win, as_of, cfg)
+    d = _build_design(win, as_of, cfg, target)
     n_p, n_t, n_l = len(d.pid), len(d.tid), len(d.lid)
     k = n_p + n_t + 1
     x0 = np.zeros(k + n_t + n_l)
@@ -568,6 +574,7 @@ def fit_snapshot(
             "sd_m": float(np.std(th[k:k + n_t])),
             "sd_c": float(np.std(th[n_p:n_p + n_t])),
             "sd_l": float(np.std(th[k + n_t:k + n_t + n_l])),
+            "target": target,
             "fitted": True,
         },
     )
@@ -618,6 +625,7 @@ def rolling_ratings(
     warm_start: bool = True,
     return_snapshots: bool = False,
     verbose: bool = False,
+    target: str = "y_blue_win",
 ) -> pd.DataFrame | tuple[pd.DataFrame, list[HierBTSnapshot]]:
     """沿日历网格重复拟合，给 `df` 的**每一行**贴上 as-of BT 特征。
 
@@ -627,6 +635,7 @@ def rolling_ratings(
     `start` 之前的行拿不到快照（特征为 0 / NaN 语义上都不对），这里返回 0 并把
     `bt_known_players=0`，调用方应当只在 `start` 之后的区间上评测。
     `end` 只是省算力的截断（调参时只需要一段），不影响 `end` 之前任何一行的取值。
+    `target`：似然里当 y 的那一列（见 `_build_design`）；某一行的 target 只进开赛晚于它的快照。
     """
     cfg = cfg or HierBTConfig()
     if not df.kickoff_utc.is_monotonic_increasing:
@@ -653,7 +662,7 @@ def rolling_ratings(
     )
     kick_naive = pd.DatetimeIndex(df.kickoff_utc).tz_convert("UTC").tz_localize(None).to_numpy()
     for gi, as_of in enumerate(grid):
-        snap = fit_snapshot(df, as_of, cfg, warm=prev if warm_start else None)
+        snap = fit_snapshot(df, as_of, cfg, warm=prev if warm_start else None, target=target)
         if warm_start and snap.diagnostics.get("fitted"):
             prev = snap
         if return_snapshots:

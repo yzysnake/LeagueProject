@@ -37,24 +37,26 @@ def _silver(n: int = 320, seed: int = 0) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _artifact(path, silver: pd.DataFrame, scope: str = "all") -> A.Artifact:
-    games, live = A.rating_games(silver, None)
-    snap, fresh = A._rating_snapshot(games, live, HierBTConfig(refit_every_days=3))
+def _artifact(path, silver: pd.DataFrame, scope: str = "all", target: str = "y_blue_win") -> A.Artifact:
+    games, live = A.rating_games(silver, None, target)
+    snap, fresh = A._rating_snapshot(games, live, HierBTConfig(refit_every_days=3), target=target)
     art = A.Artifact(coef=dict.fromkeys(A.PROD_FEATURES, 0.5), intercept=0.1,
                      mu=dict.fromkeys(A.PROD_FEATURES, 0.0), sigma=dict.fromkeys(A.PROD_FEATURES, 1.0),
                      prior_state={"team_elo": {}}, draft_state={"champ_t1": {}}, bt_state=snap.to_dict(),
                      meta={"model": "BT4_LR", "trained_on": str(silver.kickoff_utc.max()),
-                           "data_scope": scope, **fresh, "ratings_n_games": len(games)})
+                           "data_scope": scope, "rating_target": target, **fresh,
+                           "ratings_n_games": len(games)})
     art.save(str(path))
     return art
 
 
 def _ledger(path, games):
-    """台账：每局一条带阵容的 result（对账解析出的 OE id）。"""
+    """台账：每局一条带阵容、终局总经济的 result（对账解析出的 OE id）；终局时间留空。"""
     rows = []
     for gid, start, blue, red, blue_won, blue_players, league in games:
         rows.append({"kind": "result", "game_id": gid, "blue_won": blue_won, "started_at": start,
                      "ended_at": None, "league_canon": league,
+                     "blue_gold": 60_000 if blue_won else 50_000, "red_gold": 55_000,
                      "blue_oe_team": blue, "blue_team_conf": "primary",
                      "red_oe_team": red, "red_team_conf": "primary",
                      "blue_oe_players": blue_players, "red_oe_players": _roster(red)})
@@ -130,8 +132,8 @@ def test_refresh_does_not_overwrite_a_model_retrained_meanwhile(world, monkeypat
     _, path, ledger, _ = world
     orig = A.rating_games
 
-    def racing(full, led):
-        out = orig(full, led)
+    def racing(full, led, target="y_blue_win"):
+        out = orig(full, led, target)
         d = json.loads(path.read_text())
         d["coef"] = dict.fromkeys(A.PROD_FEATURES, 9.0)               # 另一个进程刚训完写下
         path.write_text(json.dumps(d))
@@ -179,3 +181,39 @@ def test_api_reloads_a_changed_artifact_and_keeps_the_old_one_on_mismatch(monkey
     mtime["v"] = 3.0
     assert M._art() == "new"                                          # 换了代码重训的：不换，接着用旧的
     assert M.S["art_mtime"] == 3.0                                    # 同一个坏文件只试一次
+
+
+def _margins(silver: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
+    """合成的赛后经济差：胜方领先 1–10 千金，30 分钟一局。"""
+    rng = np.random.default_rng(seed)
+    lead = rng.uniform(1_000, 10_000, len(silver)) * np.where(silver.y_blue_win == 1, 1, -1)
+    return pd.DataFrame({"blue_gold": 55_000 + lead, "red_gold": np.full(len(silver), 55_000.0),
+                         "gamelength_s": np.full(len(silver), 1_800.0)},
+                        index=pd.Index(silver.game_id, name="game_id"))
+
+
+def test_refresh_keeps_the_margin_target(tmp_path, monkeypatch):
+    """软标签训出来的 artifact，重解时也必须用软标签：外层系数是在这个标签的快照特征上训的。
+    台账的局没有终局时间（拿不到时长）→ 退回胜负，和 silver 缺经济的局一样。"""
+    from lolwp.models.margin import with_margin_target
+
+    silver = _silver()
+    margins = _margins(silver)
+    monkeypatch.setattr("lolwp.features.loader.load_all", lambda *a, **k: silver)
+    monkeypatch.setattr("lolwp.store.margins.load", lambda *a, **k: margins)
+    last = silver.kickoff_utc.max()
+    ledger = _ledger(tmp_path / "live_watch.jsonl", [
+        (f"g{i}", (last + pd.Timedelta(days=1, hours=i)).isoformat(), TEAMS[0], TEAMS[i + 1], True,
+         _roster(TEAMS[0]), "WLDs") for i in range(3)])
+    path = tmp_path / "prod.json"
+    _artifact(path, with_margin_target(silver, margins), target="y_margin")
+    new = A.refresh(str(path), ledger=ledger)
+    assert new is not None and new.meta["rating_target"] == "y_margin"
+    snap = HierBTSnapshot.from_dict(new.bt_state)
+    assert snap.diagnostics["target"] == "y_margin"
+    games, live = A.rating_games(with_margin_target(silver, margins), ledger, "y_margin")
+    assert list(live.y_margin) == [1.0, 1.0, 1.0]
+    cold, _ = A._rating_snapshot(games, live, HierBTConfig(refit_every_days=3), target="y_margin")
+    win, _ = A._rating_snapshot(games, live, HierBTConfig(refit_every_days=3))
+    gap = lambda a, b: max(abs(a.r_player[p] - b.r_player[p]) for p in b.r_player)
+    assert gap(snap, cold) < 1e-4 and gap(snap, win) > 1e-3

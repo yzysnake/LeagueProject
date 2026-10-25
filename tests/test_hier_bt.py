@@ -495,3 +495,44 @@ def test_gradient_matches_finite_difference_with_missing_slots() -> None:
         dn[j] -= eps
         num = (_neg_log_post(up, d, cfg)[0] - _neg_log_post(dn, d, cfg)[0]) / (2 * eps)
         assert abs(num - g[j]) < 1e-4 * max(1.0, abs(g[j])), (j, num, g[j])
+
+
+# ---------------------------------------------------------------------------
+# 软标签（赛后经济差，修订 A6）：似然里的 y 换成 [0,1] 里的值，时间正确性一条不能松
+# ---------------------------------------------------------------------------
+def _with_soft(df: pd.DataFrame, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    out = df.copy()
+    out["y_margin"] = np.clip(out.y_blue_win * 0.7 + rng.uniform(0, 0.3, len(out)), 0.01, 0.99)
+    return out
+
+
+def test_soft_target_uses_the_named_column() -> None:
+    df = _with_soft(make_games(400, seed=31)[0], 31)
+    as_of = df.kickoff_utc.max() + pd.Timedelta(days=1)
+    cfg = HierBTConfig(window_years=10.0)
+    assert np.array_equal(_build_design(df, as_of, cfg, "y_margin").y, df.y_margin.to_numpy())
+    assert np.array_equal(_build_design(df, as_of, cfg).y, df.y_blue_win.to_numpy(dtype=float))
+    soft = fit_snapshot(df, as_of, cfg, target="y_margin")
+    assert soft.diagnostics["target"] == "y_margin"
+    assert soft.r_player != fit_snapshot(df, as_of, cfg).r_player
+
+
+def test_future_soft_label_perturbation_invariance() -> None:
+    """只改 T 之后各局的软标签（赛后经济差），T 之前的特征必须逐位不变——
+    任何一局的赛后统计都进不了开赛不晚于它的那些局的特征。"""
+    df = _with_soft(make_games(2000, seed=32)[0], 32)
+    cfg = HierBTConfig(window_years=10.0, refit_every_days=30)
+    cut = df.kickoff_utc.iloc[1300]
+    moved = df.copy()
+    m_future = (moved.kickoff_utc >= cut).to_numpy()
+    moved.loc[m_future, "y_margin"] = 1 - moved.loc[m_future, "y_margin"]
+    a = rolling_ratings(df, cfg, start=T0 + pd.Timedelta(days=90), target="y_margin")
+    b = rolling_ratings(moved, cfg, start=T0 + pd.Timedelta(days=90), target="y_margin")
+    past = ~m_future
+    for c in FEATURE_COLUMNS:
+        x, z = a[c].to_numpy()[past], b[c].to_numpy()[past]
+        assert np.array_equal(x, z), (c, float(np.abs(x - z).max()))
+    assert not np.array_equal(
+        a["bt_player_diff"].to_numpy()[m_future], b["bt_player_diff"].to_numpy()[m_future]
+    )

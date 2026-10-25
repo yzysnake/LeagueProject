@@ -7,6 +7,10 @@ artifact 是自描述的（PLAN.md §4.7.2）：里面记着训练数据范围�
 **实力快照不能冻结。** 推理用的分层 BT 快照只吃快照时刻之前的比赛；它每老一周 log loss 约差 0.004、
 老一个月差 0.012（reports/exp_model_improvements.md §1.2），而外层系数是稳定的。所以 `refresh()`
 只重解快照（几秒），不重训外层；数据 = silver 全量 + 盯盘台账里 OE 还没收录的局（`ledger.live_games`）。
+
+**快照的训练标签是赛后经济差的软标签**（全量口径，预注册修订 A6，`models.margin`）：
+同一个 BT、同一组外层特征，似然里的 y 从胜负换成 σ(0.5·终局经济差 / 10 分钟)，验收段 +0.00390。
+用的是哪个标签记在 `meta.rating_target`；refresh 照它重解，不会把软标签快照换回胜负快照。
 """
 from __future__ import annotations
 
@@ -19,11 +23,19 @@ import pandas as pd
 
 ARTIFACT_DIR = "models"
 LIVE_LEDGER = "reports/live_watch.jsonl"
-# 快照要用的列（silver 与台账补充的局共有）
+# 快照要用的列（silver 与台账补充的局共有）；标签不是胜负时再加上那一列
 RATING_COLUMNS = ["game_id", "kickoff_utc", "league_canon", "league_tier", "blue_team_id",
                   "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win"]
+WIN_TARGET = "y_blue_win"
 # OE 的局只有开赛时间：按 75 分钟估一个「这局肯定打完了」的时刻（职业赛超过 75 分钟的极少）
 _GAME_SPAN = pd.Timedelta(minutes=75)
+# 各规格在开发期 walk-forward 上的成绩（tier>=1、2019 起、23,060 场；只走 load_dev，holdout 没碰）
+OOS_WIN = {"oos_log_loss": 0.61650,
+           "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场，3 天网格、胜负标签"
+                       "（reports/exp_model_improvements.md §1.1；阶段 8 报告里的 0.61917 是 14 天网格）"}
+OOS_MARGIN = {"oos_log_loss": 0.61259,
+              "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场，3 天网格、赛后经济差软标签"
+                          "（scripts/exp_margin_bt.py，reports/exp_model_improvements.md §2）"}
 # 产品模型 = BT4_LR（阶段 8 对比表：7 个候选里无一在 MDE 之上胜出）。
 #   · 分层 BT 的选手潜变量取代了 team_elo / player_elo——阶段 8 消融实测，
 #     有了 bt_player 之后拿掉那两列毫无影响（−0.00004 / −0.00016，均低于 MDE），
@@ -80,21 +92,24 @@ class Artifact:
         return Artifact(**d)
 
 
-def rating_games(full: pd.DataFrame, ledger: str | None = LIVE_LEDGER) -> tuple[pd.DataFrame, pd.DataFrame]:
+def rating_games(full: pd.DataFrame, ledger: str | None = LIVE_LEDGER,
+                 target: str = WIN_TARGET) -> tuple[pd.DataFrame, pd.DataFrame]:
     """实力快照吃的比赛：silver（训练口径的全量）+ 台账里判出胜负、OE 还没收录的局。
 
     返回 (按开赛时间升序的合并表, 其中来自台账的那部分)。ledger=None 时只用 silver。
+    target 不是胜负时 full 必须已带那一列（`models.margin.with_margin_target`）；台账的局自带。
     """
     from lolwp.live.ledger import LIVE_COLUMNS, live_games
 
+    cols = RATING_COLUMNS + ([target] if target != WIN_TARGET else [])
     live = live_games(full, ledger) if ledger else pd.DataFrame(columns=LIVE_COLUMNS)
-    games = full[RATING_COLUMNS]
+    games = full[cols]
     if len(live):
-        games = pd.concat([games, live[RATING_COLUMNS]], ignore_index=True)
+        games = pd.concat([games, live[cols]], ignore_index=True)
     return games.sort_values("kickoff_utc", kind="mergesort").reset_index(drop=True), live
 
 
-def _rating_snapshot(games: pd.DataFrame, live: pd.DataFrame, cfg, warm=None):
+def _rating_snapshot(games: pd.DataFrame, live: pd.DataFrame, cfg, warm=None, target: str = WIN_TARGET):
     """在全部已知比赛上解一次快照。返回 (快照, 写进 meta 的新鲜度字段)。
 
     ratings_cutoff = 快照里最晚一局「肯定打完了」的时刻（台账的局用终局时间，OE 的局按开赛 + 75 分钟）：
@@ -104,7 +119,7 @@ def _rating_snapshot(games: pd.DataFrame, live: pd.DataFrame, cfg, warm=None):
     from lolwp.models.hier_bt import fit_snapshot
 
     as_of = games.kickoff_utc.max() + pd.Timedelta(seconds=1)
-    snap = fit_snapshot(games, as_of, cfg, warm=warm)
+    snap = fit_snapshot(games, as_of, cfg, warm=warm, target=target)
     oe = games.kickoff_utc[~games.game_id.astype(str).str.startswith(LIVE_PREFIX)]
     ends = [oe.max() + _GAME_SPAN] if len(oe) else []
     if len(live):
@@ -117,9 +132,10 @@ def _rating_snapshot(games: pd.DataFrame, live: pd.DataFrame, cfg, warm=None):
 def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Artifact:
     """训练并打包生产模型。
 
-    scope="all"（默认）：holdout 揭盲之后的生产口径，用全部数据（预注册修订 A4）；
-    scope="dev"：只用 holdout 之前的数据，即揭盲时评测的那个模型（复现用）。
-    两种口径的特征、超参、外层模型完全一样，只差训练数据的截止时间。
+    scope="all"（默认）：holdout 揭盲之后的生产口径，用全部数据（预注册修订 A4），
+    实力快照用赛后经济差软标签（修订 A6）；
+    scope="dev"：只用 holdout 之前的数据、胜负标签，即揭盲时评测的那个模型（原样复现用）。
+    两种口径的外层特征与超参完全一样。
     """
     from sklearn.linear_model import LogisticRegression
 
@@ -128,19 +144,24 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Arti
     from lolwp.features.priors import run_state_machine
     from lolwp.models.bt_cache import rolling_ratings_cached
     from lolwp.models.hier_bt import HierBTConfig
+    from lolwp.models.margin import MARGIN_KAPPA, with_margin_target
+    from lolwp.models.margin import TARGET as MARGIN_TARGET
 
     if scope not in ("all", "dev"):
         raise ValueError(f"scope 只能是 all / dev，收到 {scope!r}")
+    target = MARGIN_TARGET if scope == "all" else WIN_TARGET
     full = load_all() if scope == "all" else load_dev()
+    if target == MARGIN_TARGET:
+        full = with_margin_target(full)
     f1, st1 = run_state_machine(full, return_state=True)
     f2, st2 = run_draft_state_machine(full, return_state=True)
     cfg_bt = HierBTConfig(refit_every_days=3)
-    fbt = rolling_ratings_cached(full, cfg_bt)
+    fbt = rolling_ratings_cached(full, cfg_bt, target=target)
     feats = pd.concat([f1, f2, fbt], axis=1)
     # 推理用的最终快照：训练截止之前的全部比赛；全量口径再加上台账里 OE 还没收录的局（同 refresh）。
     # dev 口径不碰台账：台账的局全在 holdout 期之后
-    games, live = rating_games(full, LIVE_LEDGER if scope == "all" else None)
-    bt_snap, fresh = _rating_snapshot(games, live, cfg_bt)
+    games, live = rating_games(full, LIVE_LEDGER if scope == "all" else None, target)
+    bt_snap, fresh = _rating_snapshot(games, live, cfg_bt, target=target)
 
     # 训宽评窄：拟合只用 tier>=1（同质池子），状态机跑全赛区
     m = full.league_tier >= 1
@@ -161,21 +182,26 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Arti
         # 与训练**同一个函数**，这是 §7.4 防 train-serve skew 的关键。
         bt_state=bt_snap.to_dict(),
         meta={
-            "model": "BT4_LR",
+            # 规格名跟着快照标签走：台账按它区分新旧规格的预测（同一个训练截止日也分得开）
+            "model": "BT4_LR+MOV" if target == MARGIN_TARGET else "BT4_LR",
             "trained_on": str(full.kickoff_utc.max()),
             "n_train_games": int(m.sum()),
             "n_state_games": len(full),
             "holdout_start": str(full.attrs.get("holdout_start")),
-            "oos_log_loss": 0.61917,
-            "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场（reports/stage8_comparison.md）",
+            # walk-forward 是本规格（网格、标签）在开发期的成绩；holdout 属于揭盲时评测的 dev 口径模型
+            **(OOS_MARGIN if target == MARGIN_TARGET else OOS_WIN),
             "holdout_log_loss": 0.61653,
-            "holdout_note": "final holdout 989 场，一次性揭盲于 git 437d1cb（reports/final_technical_report.md §7）",
-            # 训练口径。oos / holdout 两个数字只对 dev 口径的模型成立；all 口径在 holdout 期是样本内
+            "holdout_note": "final holdout 989 场，一次性揭盲于 git 437d1cb（reports/final_technical_report.md §7）；"
+                            "评测对象是 dev 口径（胜负标签、训练截至 2026-05-31）的模型",
+            # 训练口径。holdout 只对 dev 口径的模型成立；all 口径在 holdout 期是样本内
             "data_scope": scope,
+            "rating_target": target,
+            **({"margin_kappa": MARGIN_KAPPA} if target == MARGIN_TARGET else {}),
             # 实力快照的新鲜度：refresh() 之后这几项会变，外层系数与 trained_on 不变
             **fresh, "ratings_n_games": len(games),
-            **({"refit_note": "揭盲后的生产重训（预注册修订 A4）：同一模型规格、全量数据。"
-                              "上面两个 log loss 是 dev 口径模型的成绩，本模型的样本外成绩看盯盘台账。"}
+            **({"refit_note": "揭盲后的生产重训（预注册修订 A4）：外层规格不变、全量数据；实力快照的训练标签"
+                              "改为赛后经济差软标签（修订 A6）。walk-forward 是本规格在开发期的成绩，holdout 是"
+                              "揭盲时评测的 dev 口径模型的成绩；本模型自己的样本外成绩看盯盘台账。"}
                if scope == "all" else {}),
         },
     )
@@ -193,17 +219,24 @@ def refresh(path: str = f"{ARTIFACT_DIR}/prod.json", *, ledger: str | None = LIV
     """
     from lolwp.features.loader import load_all
     from lolwp.models.hier_bt import HierBTSnapshot
+    from lolwp.models.margin import TARGET as MARGIN_TARGET
+    from lolwp.models.margin import with_margin_target
 
     m0 = os.path.getmtime(path)
     art = Artifact.load(path)
     if art.meta.get("data_scope") != "all":
         raise RuntimeError("只有全量口径（data_scope=all）的 artifact 才重解实力快照：dev 口径是复现揭盲用的")
-    games, live = rating_games(load_all(), ledger)
+    # 照训练时的标签重解：外层系数是在这个标签的快照特征上训的，换标签就是换了一个没评测过的模型
+    target = art.meta.get("rating_target", WIN_TARGET)
+    full = load_all()
+    if target == MARGIN_TARGET:
+        full = with_margin_target(full)
+    games, live = rating_games(full, ledger, target)
     old = HierBTSnapshot.from_dict(art.bt_state)
     as_of = games.kickoff_utc.max() + pd.Timedelta(seconds=1)
     if not force and as_of <= old.as_of and art.meta.get("ratings_n_games") == len(games):
         return None
-    snap, fresh = _rating_snapshot(games, live, old.cfg, warm=old)
+    snap, fresh = _rating_snapshot(games, live, old.cfg, warm=old, target=target)
     art.bt_state = snap.to_dict()
     art.meta.update(fresh, ratings_n_games=len(games),
                     ratings_refreshed_at=str(pd.Timestamp.now(tz="UTC").floor("s")))
