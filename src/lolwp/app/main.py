@@ -44,6 +44,10 @@ def main() -> None:
     # 不给 icon_image：没有侧栏时 Streamlit 会一直显示 icon_image，字标就没机会出现
     st.logo(str(ASSETS / ("logo_light.svg" if ui.is_light() else "logo_dark.svg")), size="large")
     intro.intro()          # 开场动画：每个浏览器会话只放一次，放完把徽记交给上面这个字标
+    if old := data.stale():
+        names = "、".join(old[:3]) + (f" 等 {len(old)} 项" if len(old) > 3 else "")
+        st.html(ui.note(f"站点启动之后代码或模型更新过（{ui.esc(names)}）：页面和后台对不上时会报错或沿用旧模型，"
+                        "<b>重启站点（make app）</b>后生效。", "warn", "⟳"))
     pages = [st.Page(path, title=title, icon=icon, default=i == 0)
              for i, (path, title, icon) in enumerate(PAGES)]
     pg = st.navigation(pages, position="top")
@@ -52,6 +56,7 @@ def main() -> None:
     finally:
         # 任何一页内部出错（Streamlit 已就地显示），页脚的免责声明也必须在
         ui.footer(data.artifact().meta, data.champions()["version"])
+        data.stale()       # 把这一轮页面里才 import 的模块也记下来，之后再改才查得出
 
 
 main()

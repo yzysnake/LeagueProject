@@ -13,6 +13,8 @@ import pandas as pd
 
 SILVER = "data/silver/games.parquet"
 HOLDOUT_START_FILE = "eval/HOLDOUT_START"
+# final holdout 的揭盲记录（2026-09-20，git 437d1cb）。它在，才允许生产重训用全量数据。
+REVEAL_RECORD = "reports/final_holdout_result.json"
 
 
 def holdout_start() -> pd.Timestamp:
@@ -60,3 +62,22 @@ def load_holdout(path: str = SILVER, *, min_tier: int = 1) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df = df[(df.kickoff_utc >= holdout_start()) & (df.league_tier >= min_tier)]
     return df.sort_values("kickoff_utc", kind="mergesort").reset_index(drop=True)
+
+
+def holdout_revealed() -> bool:
+    return os.path.exists(REVEAL_RECORD)
+
+
+def load_all(path: str = SILVER) -> pd.DataFrame:
+    """**只给生产重训和它的推理端用**：holdout 揭盲之后，生产模型改用全部数据（预注册修订 A4）。
+
+    评测一律仍走 load_dev()：walk-forward、门禁、被搁置假设的重测都只看 holdout 之前，
+    数字与揭盲前可比。用全量数据训出的模型在 holdout 期是样本内的，**不能再拿 holdout 评它**；
+    它之后的样本外成绩看盯盘台账（预测在赛果出来之前就已落盘）。
+    揭盲记录不在时拒绝——揭盲之前这样用就是把 holdout 漏进了训练。
+    """
+    if not holdout_revealed():
+        raise RuntimeError(f"holdout 尚未揭盲（{REVEAL_RECORD} 不存在），拒绝加载全量数据：开发期只能用 load_dev()")
+    df = pd.read_parquet(path).sort_values("kickoff_utc", kind="mergesort").reset_index(drop=True)
+    df.attrs["holdout_start"] = holdout_start()
+    return df

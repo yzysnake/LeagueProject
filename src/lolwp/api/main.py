@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -38,6 +39,7 @@ ART_PATH = os.environ.get("LOLWP_ARTIFACT", "models/prod.json")
 CMAP_PATH = "data/ddragon/champion_map.json"
 SILVER = "data/silver/games.parquet"
 RUN_ID = uuid.uuid4().hex[:12]
+log = logging.getLogger(__name__)
 
 # 实测的高自信段校准（reports/stage8_comparison.md）
 _EXTREME = [(0.95, 0.9255), (0.90, 0.9286), (0.85, 0.8880)]
@@ -45,9 +47,7 @@ _EXTREME = [(0.95, 0.9255), (0.90, 0.9286), (0.85, 0.8880)]
 S: dict[str, Any] = {}
 
 
-def _load_state() -> dict[str, Any]:
-    """同步加载。冷启动要读 10 MB 的 artifact 与状态快照，
-    放在 lifespan 里用线程跑，避免阻塞事件循环。"""
+def _load_artifact():
     from lolwp.models.artifact import PROD_FEATURES, Artifact
 
     art = Artifact.load(ART_PATH)
@@ -60,11 +60,40 @@ def _load_state() -> dict[str, Any]:
             f"  代码 PROD_FEATURES: {list(PROD_FEATURES)}\n"
             f"  请重新 `make artifact`。"
         )
+    return art
+
+
+def _mtime(path: str) -> float | None:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _load_state() -> dict[str, Any]:
+    """同步加载。冷启动要读 10 MB 的 artifact 与状态快照，
+    放在 lifespan 里用线程跑，避免阻塞事件循环。"""
+    m = _mtime(ART_PATH)
+    art = _load_artifact()
     with open(CMAP_PATH) as fh:
         cm = json.load(fh)
-    return {"art": art, "champs": cm["champions"],
+    return {"art": art, "art_mtime": m, "champs": cm["champions"],
             "by_key": {c["dd_key"]: c for c in cm["champions"]},
             "dd_version": cm["version"], "poller": None}
+
+
+def _art():
+    """当前的 artifact。文件换过（盯盘每有新赛果就重解实力快照，`artifact.refresh`）就重新加载，
+    不用重启服务。新文件读不了、或特征集对不上当前代码（换了代码重训的）：照样拒绝，接着用旧的——
+    旧的和正在跑的代码是一致的。每个新文件只试一次，坏文件不至于每个请求都重读 10 MB。"""
+    m = _mtime(ART_PATH)
+    if m is not None and m != S.get("art_mtime"):
+        S["art_mtime"] = m
+        try:
+            S["art"] = _load_artifact()
+        except (OSError, ValueError, RuntimeError) as e:
+            log.warning("artifact 重新加载失败，继续用旧的：%s", e)
+    return S["art"]
 
 
 @asynccontextmanager
@@ -109,7 +138,7 @@ def _confidence_note(p: float) -> str | None:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    art = S["art"]
+    art = _art()
     m = art.meta
     return HealthResponse(
         ok=True, model_version=m.get("model", "?"),
@@ -164,7 +193,7 @@ def predict(req: PredictRequest) -> PredictResponse:
     from lolwp.app.predict import predict as _p
     from lolwp.models.artifact import LAYER_OF
 
-    art = S["art"]
+    art = _art()
     r = _p(art, _to_draft(req))
     return PredictResponse(
         p_blue=r.p_blue, logit=r.logit, layers=r.layers, warnings=r.warnings,
@@ -190,7 +219,7 @@ def predict_batch(req: BatchPredictRequest) -> BatchPredictResponse:
     bad = [c for c in req.candidates if c not in S["by_key"]]
     if bad:
         raise HTTPException(422, f"未知的英雄 key：{bad[:5]}")
-    wi = whatif_swap(S["art"], d, req.side, slot, req.candidates)
+    wi = whatif_swap(_art(), d, req.side, slot, req.candidates)
     return BatchPredictResponse(
         base_p_blue=float(wi.attrs["base_p"]),
         items=[BatchItem(champion=int(r.champ_key), p_blue=float(r.p_blue),

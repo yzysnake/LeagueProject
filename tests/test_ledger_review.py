@@ -145,3 +145,78 @@ def test_backfilled_games_count_as_late_and_carry_their_kickoff(tmp_path):
     df = load_review(_write(tmp_path, [bf])).set_index("game_id")
     assert bool(df.loc["bf", "late"]) and bool(df.loc["bf", "backfill"])
     assert str(df.loc["bf", "game_time"])[:16] == "2026-10-15 18:16"
+
+
+def test_model_provenance_defaults_to_the_only_model_before_refits(tmp_path):
+    """2026-10-24 之前的记录没有 model 字段——那时只有训练至 5/31 的那一个模型。"""
+    from lolwp.live.ledger import LEGACY_MODEL
+    rows = [_pred("old", 0.6, ["X", "Y"], "X", "Y"),
+            dict(_pred("new", 0.6, ["X", "Y"], "X", "Y"), model="BT4_LR@2026-10-23")]
+    df = load_review(_write(tmp_path, rows)).set_index("game_id")
+    assert df.loc["old", "model"] == LEGACY_MODEL and df.loc["new", "model"] == "BT4_LR@2026-10-23"
+
+
+# ---- live_games：台账里 OE 还没收录的局 → 给实力快照重解用 ----
+
+def _silver():
+    import pandas as pd
+    t = pd.Timestamp
+    return pd.DataFrame({
+        "game_id": ["oe1", "oe2", "oe3"],
+        "kickoff_utc": [t("2026-09-10 10:00", tz="UTC"), t("2026-09-18 12:00", tz="UTC"),
+                        t("2026-10-01 09:00", tz="UTC")],
+        "league_canon": ["LCK", "LCK", "WLDs"], "league_tier": [1, 1, 2],
+        "blue_team_id": ["T1", "GEN", "HLE"], "red_team_id": ["GEN", "T1", "BLG"],
+        "blue_player_ids": [[f"{t}-{i}" for i in range(5)] for t in ("T1", "GEN", "HLE")],
+        "red_player_ids": [[f"{t}-{i}" for i in range(5)] for t in ("GEN", "T1", "BLG")],
+    })
+
+
+def _lineup(gid, start, *, blue_won=True, league="WLDs", blue="T1", red="BLG", conf="primary",
+            players=None, end=None):
+    return {"kind": "result", "game_id": gid, "blue_won": blue_won, "started_at": start,
+            "ended_at": end, "league_canon": league,
+            "blue_oe_team": blue, "blue_team_conf": conf, "red_oe_team": red, "red_team_conf": "primary",
+            "blue_oe_players": players or [f"{blue}-{i}" for i in range(5)],
+            "red_oe_players": [f"{red}-{i}" for i in range(5)]}
+
+
+def test_live_games_keeps_only_resolved_new_results(tmp_path):
+    """收：阵容解析出、两队 primary、胜负判得出、OE 还没有的局。其余一律不收。"""
+    from lolwp.live.ledger import live_games
+
+    rows = [
+        _lineup("ok", "2026-10-20T10:00:00.000Z", end="2026-10-20T10:31:00.000Z",
+                players=["T1-0", None, "fallback:player:league_pos_median:WLDs:mid", "T1-3", "T1-4"]),
+        # contested 对照：阵容作证（这 5 个人 OE 里最后效力的就是 T1）才收，否则可能选错了队
+        _lineup("contested_ok", "2026-10-20T10:40:00.000Z", conf="contested"),
+        _lineup("contested", "2026-10-20T11:00:00.000Z", conf="contested",
+                players=[f"GEN-{i}" for i in range(5)]),
+        _lineup("pending", "2026-10-20T12:00:00.000Z", blue_won=None),          # 胜负没判出
+        _lineup("unmapped", "2026-10-20T13:00:00.000Z", blue=None),             # 队伍没解析出
+        _lineup("lck_old", "2026-09-18T12:20:00.000Z", league="LCK", blue="GEN", red="T1"),  # OE 已收录（30 分钟护栏内）
+        _lineup("lck_new", "2026-09-19T08:00:00.000Z", league="LCK", blue="GEN", red="T1"),  # LCK 最后一场之后
+        # 赛区标签和 OE 不一致（OE 记 WLDs、feed 记 LPL），但同一对队伍、开赛只差 5 分钟：同一局，不收
+        _lineup("relabeled", "2026-10-01T09:05:00.000Z", league="LPL", blue="BLG", red="HLE"),
+        _lineup("new_league", "2026-10-21T10:00:00.000Z", league="EMEA Masters", blue="KC", red="VIT"),
+        {"kind": "result", "game_id": "dup", "blue_won": True},                 # 先来一条没阵容的
+        _lineup("dup", "2026-10-22T10:00:00.000Z", blue_won=False),             # 后补的这条为准
+    ]
+    df = live_games(_silver(), _write(tmp_path, rows))
+    assert list(df.game_id) == ["live:lck_new", "live:ok", "live:contested_ok", "live:new_league", "live:dup"]
+    ok = df.set_index("game_id").loc["live:ok"]
+    assert (ok.league_canon, ok.league_tier, ok.blue_team_id, ok.red_team_id, ok.y_blue_win) == \
+        ("WLDs", 2, "T1", "BLG", 1)
+    assert ok.blue_player_ids == ["T1-0", None, None, "T1-3", "T1-4"]     # 解析不出 / 哨兵 id → 缺位
+    assert str(ok.kickoff_utc) == "2026-10-20 10:00:00+00:00" and str(ok.ended_utc)[:16] == "2026-10-20 10:31"
+    assert df.set_index("game_id").loc["live:new_league"].league_tier == 0
+    assert df.set_index("game_id").loc["live:dup"].y_blue_win == 0
+
+
+def test_live_games_start_time_falls_back_to_the_prediction(tmp_path):
+    """对账没拿到首帧时间的局：退回预测里的 started_at / 落盘时间。"""
+    from lolwp.live.ledger import live_games
+
+    p = _pred("g", 0.5, ["T1", "BLG"], "T1", "BLG", at="2026-10-20 10:04:00")
+    df = live_games(_silver(), _write(tmp_path, [p, _lineup("g", None)]))
+    assert str(df.kickoff_utc.iloc[0]) == "2026-10-20 10:04:00+00:00"

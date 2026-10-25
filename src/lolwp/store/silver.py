@@ -15,6 +15,10 @@
     （它仍把 PCS/VCS 记为 tier 1 且无分段）。
 
 tier 约定：2 = 国际赛，1 = 一线赛区，0 = 其余。
+
+**OE 的 WLDs 里混着各赛区的世界赛资格赛**（LPL 每年、LCK 2022–2024，2022–2026 共 98 场）：
+它们是一个赛区内部的比赛，按本项目自己的定义（tier 2 = 参赛队来自 ≥3 个赛区）不是国际赛。
+reassign_worlds_qualifiers() 把它们归回所属赛区，league_raw 仍保留 OE 原值以便追溯。
 """
 from __future__ import annotations
 
@@ -65,6 +69,41 @@ def league_tier(league_raw: str, day: str, rules: dict[str, object]) -> int:
     return 0
 
 
+def reassign_worlds_qualifiers(g: pd.DataFrame, intl_raw: set[str]) -> pd.DataFrame:
+    """把 OE 记在 WLDs 名下的赛区内世界赛资格赛归回所属赛区（就地改 league_canon / league_tier）。
+
+    判据（逐年）：主赛事从当年第一场「两队所属赛区不同」的 WLDs 比赛开始；在那之前、
+    两队所属赛区**都已知且相同**的 WLDs 比赛，就是那个赛区的资格赛。当年还没有跨赛区的
+    WLDs 比赛时（主赛事尚未开打），这类比赛全部算资格赛。所属赛区 = 该队当年非国际赛里
+    最常见的（赛区, tier）。两队有一方所属赛区未知的不动——2014/2015 的世界赛揭幕战就是这样。
+    [实测] 2022–2025 主赛事之前的 WLDs 比赛全部是 LCK 对 LCK 或 LPL 对 LPL；
+    2026 的 8 场是 9/17–18 的 LPL 资格赛（gameid 是 LPL 官网格式，url 指向 lpl.qq.com）。
+    """
+    year = g.kickoff_utc.dt.year
+    cols = ["league_canon", "league_tier"]
+    rows = pd.concat([
+        pd.DataFrame({"tid": g[f"{s}_team_id"], "year": year, "lg": g.league_canon, "tier": g.league_tier,
+                      "raw": g.league_raw})
+        for s in ("blue", "red")])
+    rows = rows[~rows.raw.isin(intl_raw) & rows.tid.notna()]
+    home = (rows.groupby(["tid", "year", "lg", "tier"]).size().reset_index(name="n")
+            .sort_values("n", ascending=False).drop_duplicates(["tid", "year"])
+            .set_index(["tid", "year"])[["lg", "tier"]])
+    is_w = g.league_canon == "WLDs"
+    hb = home.reindex(list(zip(g.blue_team_id, year))).to_numpy()
+    hr = home.reindex(list(zip(g.red_team_id, year))).to_numpy()
+    known = pd.notna(hb[:, 0]) & pd.notna(hr[:, 0])
+    same = known & (hb[:, 0] == hr[:, 0])
+    cross = is_w.to_numpy() & known & ~same
+    first_cross = pd.Series(g.kickoff_utc[cross].to_numpy(), index=year[cross]).groupby(level=0).min()
+    start = year.map(first_cross)
+    pre = start.isna() | (g.kickoff_utc < start)
+    q = is_w.to_numpy() & same & pre.to_numpy()
+    g.loc[q, cols[0]] = hb[q, 0]
+    g.loc[q, cols[1]] = hb[q, 1].astype(int)
+    return g
+
+
 def load_primary_crosswalk(path: str = CROSSWALK) -> dict[str, str]:
     """只取 confidence == 'primary'。
 
@@ -95,6 +134,9 @@ def build(bronze_path: str = BRONZE, out_dir: str = SILVER_DIR) -> pd.DataFrame:
     g["league_canon"] = g.league_raw.map(canon).fillna(UNKNOWN)
     day = g.kickoff_utc.dt.strftime("%Y-%m-%d")
     g["league_tier"] = [league_tier(lg, d, rules) for lg, d in zip(g.league_raw, day)]
+    n_w = int((g.league_canon == "WLDs").sum())
+    g = reassign_worlds_qualifiers(g, rules["intl"])
+    print(f"  WLDs 里的赛区内资格赛归回所属赛区：{n_w - int((g.league_canon == 'WLDs').sum())} 场")
 
     # ---- series_id：必须在 league_canon 之后，因为切分按 canon 分组 ----
     g = g.rename(columns={"game_in_match_raw": "game_no"})

@@ -474,11 +474,20 @@ def test_walkforward_lambda_one_reproduces_frozen_l3(real: dict[str, object]) ->
         rows.append(pd.DataFrame({"game_id": df.loc[f.valid_idx, "game_id"].to_numpy(),
                                   "p_same": p_same, "p_nc": p_nc}))
     got = pd.concat(rows, ignore_index=True)
-    ref = pd.read_parquet(PREDS).query("model == 'L3'")[["game_id", "y", "p"]]
-    m = ref.merge(got, on="game_id")
-    assert len(m) == len(ref) == 23060
+    # 参照一：同一份数据上现算的 L3（baselines 的原实现）——实现等价必须逐位成立。
+    # 不拿冻结文件当这个参照：数据修正（修订 A5，98 场资格赛归回赛区）会让冻结的预测
+    # 和现在的数据对不上，那测的就成了「数据有没有变」而不是「实现对不对」。
+    from lolwp.eval.baselines import run_ladder
+    fresh = run_ladder(df, feats, folds, names=["L3"])[["game_id", "y", "p"]]
+    m = fresh.merge(got, on="game_id")
+    assert len(m) == len(fresh) == 23060
     assert (m.p - m.p_same).abs().max() < 1e-12
-    # 默认解算器只差在收敛精度上：逐场 <1e-3，汇总 log loss 与冻结的 0.632304 同到 1e-4
+    # 默认解算器只差在收敛精度上：逐场 <1e-3，汇总 log loss 同到 1e-4
+    ll = log_loss(m.y.to_numpy(), m.p.to_numpy())
     assert (m.p - m.p_nc).abs().max() < 1e-3
-    assert abs(log_loss(m.y.to_numpy(), m.p_nc.to_numpy()) - 0.632304) < 1e-4
-    assert abs(log_loss(m.y.to_numpy(), m.p_same.to_numpy()) - 0.632304) < 1e-6
+    assert abs(log_loss(m.y.to_numpy(), m.p_nc.to_numpy()) - ll) < 1e-4
+    assert abs(log_loss(m.y.to_numpy(), m.p_same.to_numpy()) - ll) < 1e-12
+    # 参照二：冻结的阶梯预测（修正之前算的 0.632304）——只允许数据修正带来的小漂移，
+    # 容差与 make reproduce 一致
+    assert len(pd.read_parquet(PREDS).query("model == 'L3'")) == 23060
+    assert abs(ll - 0.632304) < 5e-4, f"L3 walk-forward log loss 漂到了 {ll:.6f}"

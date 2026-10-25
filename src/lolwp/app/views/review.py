@@ -50,11 +50,16 @@ def render() -> None:
         leagues = sorted(df["league"].unique())
         pick = c2.multiselect("赛事", leagues, key="review_leagues", placeholder="全部赛事",
                               persist_state="session") or leagues
+        models = sorted(df["model"].unique())
+        # 生产模型重训过（修订 A4）：一个模型的样本外成绩只该看它训练截止日之后的预测，所以按模型分开看
+        mpick = (c2.multiselect("模型", models, key="review_models", placeholder="全部模型",
+                                format_func=lambda m: f"训练至 {m.split('@')[-1]}", persist_state="session")
+                 or models) if len(models) > 1 else models
         n_late = int(df["late"].eq(True).sum())
         strict = c3.toggle("排除赛后补录", key="review_strict", persist_state="session",
                            help=f"只算对局结束前就落盘的预测（台账里共 {n_late} 局是赛后补录）")
 
-    scope = df[df["league"].isin(pick)]
+    scope = df[df["league"].isin(pick) & df["model"].isin(mpick)]
     if lo is not None:
         scope = scope[(scope["game_time"] >= lo) & (scope["game_time"] < hi)]
     if strict:
@@ -108,6 +113,7 @@ def render() -> None:
         "实际": view["blue_won"].map({True: "蓝胜", False: "红胜"}).fillna("—"),
         "结果": view["status"].map({"命中": "✅ 命中", "未中": "❌ 未中", "待定": "⏳ 待定"}),
         "备注": note,
+        "模型": view["model"].map(lambda m: f"训练至 {m.split('@')[-1][5:]}"),
     })
     st.dataframe(out, hide_index=True, width="stretch", height=min(640, 38 + 35 * max(1, len(out))),
                  column_config={"预测蓝胜": st.column_config.ProgressColumn(

@@ -14,8 +14,12 @@
 **赛后补录（--backfill）**：盯盘没在跑（launchd 停了）或机器在睡（合盖），
 整局开打又打完都不在 getLive 里出现，实时轮询就永远看不到它。但 feed 对打完的局
 仍然给 gameMetadata（BP 后阵容），所以可以事后从赛程找出这些局、读阵容、用同一个
-冻结模型补出预测——和实时算的是同一个数（只用阵容，不读任何赛中数据），只是落盘晚，
+模型补出预测——和实时算的是同一个数（只用阵容，不读任何赛中数据），只是落盘晚，
 记录带 `source: "backfill"`，在「近期战绩」里归入「赛后补录」，可以一键排除。
+
+**实力快照随赛果重解**：盯盘每 30 分钟对账一次，对账时把这局的阵容解析成 OE id 写进 result；
+有新赛果就 `artifact.refresh()`（几秒，外层系数不动）并换上新 artifact。快照冻结一个月
+log loss 就差 0.012（reports/exp_model_improvements.md §1.2），OE 断更时只能靠这条路。
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ FEED = "https://feed.lolesports.com/livestats/v1"
 KEY = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
 WAKE_GAP_S = 120          # 一轮间隔超过这么久 = 机器刚从睡眠里醒来
 SCHEDULE_MAX_PAGES = 12   # getSchedule 每页 80 场，12 页约覆盖一个月
+RECONCILE_EVERY_S = 1800  # 盯盘中每 30 分钟对账一次：有新赛果就重解实力快照
 
 
 def _now() -> str:
@@ -90,10 +95,12 @@ def _feed_game(s, gid: str) -> dict | None:
     first = r.json()
     md = first.get("gameMetadata") or {}
     frames = first.get("frames") or []
+    # payload：首帧 + gameMetadata，给对账解析阵容用（与预测时读的是同一份 BP 后阵容）
     out = {"blue_id": (md.get("blueTeamMetadata") or {}).get("esportsTeamId"),
            "red_id": (md.get("redTeamMetadata") or {}).get("esportsTeamId"),
            "started_at": frames[0].get("rfc460Timestamp") if frames else None,
-           "ended_at": None, "blue_won": None}
+           "ended_at": None, "blue_won": None, "blue_gold": None, "red_gold": None,
+           "payload": first}
     if not frames:
         return out
     t0 = datetime.fromisoformat(frames[0]["rfc460Timestamp"])
@@ -112,6 +119,9 @@ def _feed_game(s, gid: str) -> dict | None:
             rd = (fin.get("redTeam") or {}).get("inhibitors") or 0
             if (b > 0) != (rd > 0):
                 out["blue_won"] = b > 0
+            # 终局双方总经济：赛后统计，只给以后的实力快照当标签用（margin of victory），绝不进本局特征
+            out["blue_gold"] = (fin.get("blueTeam") or {}).get("totalGold")
+            out["red_gold"] = (fin.get("redTeam") or {}).get("totalGold")
             break
         if frames[-1].get("rfc460Timestamp") == last:
             break
@@ -158,25 +168,56 @@ def _load_ledger() -> tuple[dict, dict]:
     return preds, results
 
 
-def reconcile() -> None:
-    """拉赛程结果，与已记录的预测对账。"""
+def _resolver():
+    """对账解析阵容用的 Resolver（纯查表、离线）。crosswalk 不在就不解析，对账照常。"""
+    try:
+        from lolwp.live.resolve import Resolver
+
+        return Resolver.load(build_missing=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"  阵容解析器不可用（{type(e).__name__}: {e}），本次对账不记阵容", file=sys.stderr)
+        return None
+
+
+def _lineup(resolver, payload: dict, league: str | None) -> dict:
+    """这一局 BP 后阵容 → OE 队伍 / 选手 id（与预测时同一个解析器、同一份 gameMetadata）。
+
+    写进 result，给 ledger.live_games 拼「OE 还没收录的局」重解实力快照。
+    队伍附上对照可信度：contested 的对照可能选错队，那边会跳过。
+    """
+    rg = resolver.resolve_window(payload, feed_league_name=league)
+    return {"league_canon": rg.league_canon,
+            "blue_oe_team": rg.blue.oe_team_id, "blue_team_conf": rg.blue.team_confidence,
+            "red_oe_team": rg.red.oe_team_id, "red_team_conf": rg.red.team_confidence,
+            "blue_oe_players": list(rg.blue.player_ids), "red_oe_players": list(rg.red.player_ids)}
+
+
+def reconcile(resolver=None, *, quiet: bool = False, pause_s: float = 0.5) -> int:
+    """拉赛程结果，与已记录的预测对账。返回这次往台账里追加的 result 条数（新判出 + 补字段）。
+
+    resolver 给定（盯盘里传自己的）就用它解析阵容，否则现场 load 一个；quiet=True 不打印对账表。
+    pause_s：每读完一局 feed 歇一下。一局要跳 5–10 个 window，第一次给老记录补阵容时有几十局。
+    """
     import requests
 
     preds, results = _load_ledger()
     if not preds:
         print("尚无预测记录")
-        return
+        return 0
 
+    if resolver is None:
+        resolver = _resolver()
     s = requests.Session()
     s.headers.update({"x-api-key": KEY, "User-Agent": "lolwp/1.0"})
     events: dict[str, dict] = {}
     n_new = n_pending = n_fill = 0
+    # 判出胜负、且带了 feed 的蓝红方与开局/终局时间（ended_at 这个键在）、能解析时带了阵容，才算对完
+    need = ("ended_at",) + (("blue_oe_team",) if resolver is not None else ())
     for gid, p in preds.items():
         prev = results.get(gid)
-        # 判出胜负、且带了 feed 的蓝红方与开局/终局时间（ended_at 这个键在）才算对完。
-        # blue_won=None 的会重试；早期判出胜负但没带这些字段的只补字段，胜负不动。
+        # blue_won=None 的会重试；早期判出胜负但缺这些字段的只补字段，胜负不动。
         refill = prev is not None and prev.get("blue_won") is not None
-        if refill and "ended_at" in prev:
+        if refill and all(k in prev for k in need):
             continue
         mid = p.get("match_id")
         if not mid:
@@ -193,6 +234,7 @@ def reconcile() -> None:
                 n_pending += 1
                 continue
             fg = _feed_game(s, gid)
+            time.sleep(pause_s)
             if fg is None:
                 # feed 暂时拿不到：蓝红方无从和预测对齐，下次再试
                 n_pending += 0 if refill else 1
@@ -206,11 +248,15 @@ def reconcile() -> None:
             red_id = fg["red_id"] if fg["red_id"] in ids else None
             code = {t["id"]: t.get("code") for t in teams}
             extra = {"blue_team": code.get(blue_id), "red_team": code.get(red_id),
-                     "started_at": fg["started_at"], "ended_at": fg["ended_at"]}
+                     "started_at": fg["started_at"], "ended_at": fg["ended_at"],
+                     "blue_gold": fg["blue_gold"], "red_gold": fg["red_gold"],
+                     **(_lineup(resolver, fg["payload"], p.get("league")) if resolver is not None else {})}
             if refill:
                 if fg["blue_won"] is not None and fg["blue_won"] != prev["blue_won"]:
                     print(f"  {gid} 终局帧与已记录的胜负矛盾，未补字段", file=sys.stderr)
                     continue
+                if not (extra.keys() - prev.keys()):
+                    continue   # 没有可补的新字段：不重复追加
                 _append({**prev, "recorded_at": _now(), **extra})
                 n_fill += 1
                 continue
@@ -236,6 +282,10 @@ def reconcile() -> None:
                 n_pending += 1
         except Exception as e:  # noqa: BLE001
             print(f"  对账 {gid} 失败：{type(e).__name__}: {e}", file=sys.stderr)
+    if quiet:
+        if n_new or n_fill:
+            print(f"[{_now()}] 对账：新判出 {n_new} 局，补字段 {n_fill} 条，仍待定 {n_pending} 条", flush=True)
+        return n_new + n_fill
     print(f"新对账 {n_new} 条，补字段 {n_fill} 条，仍待定 {n_pending} 条")
 
     # 汇总：和网站「近期战绩」同一套逻辑（蓝红方、赛后补录、指标），两边数字不会对不上
@@ -245,7 +295,7 @@ def reconcile() -> None:
     rows = df[df["hit"].notna()].iloc[::-1]  # 按比赛时间从早到晚
     if rows.empty:
         print("尚无可对账的完赛记录")
-        return
+        return n_new + n_fill
     print(f"\n=== 对账（{len(rows)} 局）===")
     print(f"{'对阵（蓝 vs 红）':<36}{'预测蓝胜':>9}{'实际':>7}  命中")
     for r in rows.itertuples():
@@ -258,12 +308,18 @@ def reconcile() -> None:
             print(f"\n  {label}命中 {hits}/{sm['n_done']} = {sm['hit_rate']:.1%}   "
                   f"log loss {sm['log_loss']:.4f}   Brier {sm['brier']:.4f}", end="")
     print()
+    return n_new + n_fill
 
 
-def _record(g: dict, pr: dict, **extra) -> dict:
-    """台账里的一条预测。实时捕获与赛后补录共用，两边字段必须一模一样。"""
-    return {"kind": "prediction", "game_id": str(g.get("game_id")),
-            "match_id": g.get("match_id"), "recorded_at": _now(),
+def _record(g: dict, pr: dict, model: str | None = None, ratings: str | None = None, **extra) -> dict:
+    """台账里的一条预测。实时捕获与赛后补录共用，两边字段必须一模一样。
+
+    model = 算这条预测的 artifact（「BT4_LR@训练截止日」）。生产模型会重训，
+    不记下来的话，台账里新旧模型的预测就混在一起分不开了。
+    ratings = 当时实力快照的时刻（外层系数不变、快照每有新赛果就重解）。
+    """
+    return {"kind": "prediction", "game_id": str(g.get("game_id")), "model": model,
+            "ratings": ratings, "match_id": g.get("match_id"), "recorded_at": _now(),
             "league": g.get("league"), "teams": g.get("teams"),
             "p_blue": pr.get("p_blue"), "layers": pr.get("layers"),
             "blue_champ_keys": pr.get("blue_champ_keys"),
@@ -271,6 +327,43 @@ def _record(g: dict, pr: dict, **extra) -> dict:
             "blue_names": pr.get("blue_names"), "red_names": pr.get("red_names"),
             "warnings": g.get("warnings"),
             "latency_200_to_pred_s": g.get("latency_200_to_pred_s"), **extra}
+
+
+def _model_id(pol) -> str | None:
+    meta = getattr(getattr(pol, "artifact", None), "meta", None) or {}
+    return f"{meta.get('model', '?')}@{str(meta.get('trained_on', '?'))[:10]}" if meta else None
+
+
+def _ratings_id(pol) -> str | None:
+    """实力快照的时刻（精确到分钟）；没重解过的老 artifact 就是训练截止。"""
+    meta = getattr(getattr(pol, "artifact", None), "meta", None) or {}
+    t = meta.get("ratings_as_of") or meta.get("trained_on")
+    return str(t)[:16] if t else None
+
+
+def _ratings_cutoff(pol) -> datetime:
+    """快照里最晚一局「肯定打完了」的时刻；补录只补开局晚于它的局（见 backfill）。"""
+    meta = getattr(getattr(pol, "artifact", None), "meta", None) or {}
+    return max(_utc(str(meta.get(k)).replace(" ", "T")) for k in ("trained_on", "ratings_cutoff")
+               if meta.get(k))
+
+
+def _refresh_ratings(pol, *, refresh=None) -> str | None:
+    """重解实力快照并换上新 artifact；返回一句日志，没有新比赛 / 出错返回 None（出错只打日志）。
+
+    重解失败绝不能拖垮盯盘：快照旧一点只是准一点点，盯盘停了是整局整局地漏。
+    """
+    try:
+        if refresh is None:
+            from lolwp.models.artifact import refresh
+        if refresh() is None or not pol.reload_artifact_if_changed():
+            return None
+        m = pol.artifact.meta
+        return (f"[{_now()}] 实力快照已重解至 {str(m.get('ratings_as_of'))[:16]}"
+                f"（含盯盘补充 {m.get('n_live_games', 0)} 场）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] 实力快照重解失败（继续用旧快照）：{type(e).__name__}: {e}", flush=True)
+        return None
 
 
 def _schedule(s, since: datetime) -> list[dict]:
@@ -311,7 +404,8 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
 
     三条纪律：
     - **只补模型没见过的局**：开局早于 artifact 训练截止的局，模型训练时可能见过它，
-      补出来的「预测」是样本内的，直接跳过。
+      补出来的「预测」是样本内的，直接跳过。实力快照重解之后同理：开局早于快照里最晚一局的终局
+      （`ratings_cutoff`），就用上了它开打之后才有的赛果，也跳过。所以盯盘醒来先补录、再对账重解。
     - **站在开局时刻预测**：now = feed 首帧时间，与实时捕获的衰减一致。
     - **不和实时盯盘抢**：只补 state=completed 的局；落盘前再读一次台账，
       另一个进程刚记下的局不重复写。
@@ -321,7 +415,7 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
     from lolwp.live.lolesports import FeedState
 
     seen = _seen_games() if seen is None else seen
-    trained_on = _utc(str(pol.artifact.meta.get("trained_on")).replace(" ", "T"))
+    cutoff = _ratings_cutoff(pol)
     n = 0
     for ev in _schedule(s, since):
         m = ev.get("match") or {}
@@ -360,7 +454,7 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
                     continue
                 frames = res.payload.get("frames") or []
                 started = frames[0].get("rfc460Timestamp") if frames else None
-                if started is None or _utc(started) <= trained_on:
+                if started is None or _utc(started) <= cutoff:
                     _SKIP_GAMES.add(gid)
                     continue
                 pr, warns = pol.predict_window(res.payload, name, now=_utc(started))
@@ -372,7 +466,7 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
                     continue
                 g = {"game_id": gid, "match_id": mid, "league": name, "teams": codes,
                      "warnings": warns, "latency_200_to_pred_s": None}
-                _append(_record(g, pr, source="backfill", started_at=started))
+                _append(_record(g, pr, _model_id(pol), _ratings_id(pol), source="backfill", started_at=started))
                 seen.add(gid)
                 n += 1
                 print(f"[{_now()}] 补录 {name} {' vs '.join(codes or ['?', '?'])}"
@@ -417,14 +511,18 @@ def watch(hours: float) -> int:
         print(f"轮询器构建失败：{type(e).__name__}: {e}", file=sys.stderr)
         return 1
     seen = _seen_games()
-    print(f"[{_now()}] 开始盯盘 {hours:.1f} 小时，已记录 {len(seen)} 局", flush=True)
+    print(f"[{_now()}] 开始盯盘 {hours:.1f} 小时，已记录 {len(seen)} 局，模型 {_model_id(pol)}，"
+          f"实力快照 {_ratings_id(pol)}", flush=True)
     s = _session()
     # 启动先补一次：launchd 重启、或上一轮结束到这一轮开始之间打完的局。
     # 只在补录成功后清空：赛程接口一时拿不到就下一圈重来。
     backfill_from: datetime | None = datetime.now(UTC) - timedelta(days=2)
-    last_log = 0.0
+    last_log = last_reconcile = 0.0
     while time.time() < deadline:
         try:
+            if pol.reload_artifact_if_changed():   # make artifact / make refresh 换过模型文件
+                print(f"[{_now()}] 换上新 artifact：模型 {_model_id(pol)}，实力快照 {_ratings_id(pol)}",
+                      flush=True)
             pol.tick()
             snap = pol.snapshot()
             for g in snap.get("games", []):
@@ -437,7 +535,7 @@ def watch(hours: float) -> int:
                 seen |= _seen_games()   # 补录可能由另一个进程（make backfill）刚写过
                 if gid in seen:
                     continue
-                _append(_record(g, pr))
+                _append(_record(g, pr, _model_id(pol), _ratings_id(pol)))
                 seen.add(gid)
                 print(f"[{_now()}] 捕获 {g.get('league')} "
                       f"{' vs '.join(g.get('teams') or ['?','?'])} → 蓝方 {pr['p_blue']:.1%}",
@@ -445,6 +543,11 @@ def watch(hours: float) -> int:
             if backfill_from is not None:
                 backfill(pol, s, backfill_from, seen=seen)
                 backfill_from = None
+            # 补录之后才对账、重解：补录站在开局时刻预测，先重解就会让刚醒来要补的局用上之后的赛果
+            if time.time() - last_reconcile > RECONCILE_EVERY_S:
+                last_reconcile = time.time()
+                if reconcile(pol.resolver, quiet=True) and (msg := _refresh_ratings(pol)):
+                    print(msg, flush=True)
             if time.time() - last_log > 1800:
                 h = pol.health()
                 print(f"[{_now()}] 心跳：监视 {h['n_watched']} 场，已捕获 {len(seen)} 局",

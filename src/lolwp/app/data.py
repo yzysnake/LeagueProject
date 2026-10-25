@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any
 
 import pandas as pd
@@ -38,14 +39,56 @@ def _read_json(path: str) -> Any:
         return json.load(fh)
 
 
-@st.cache_resource
-def artifact() -> Artifact:
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+@st.cache_resource(max_entries=1)
+def _artifact_at(mtime: float) -> Artifact:
     return Artifact.load(ART)
 
 
-@st.cache_resource
+def artifact() -> Artifact:
+    """当前的模型。文件一换（盯盘每有新赛果就重解实力快照，`artifact.refresh`）就自动重新加载：
+    按修改时间分缓存，不用重启站点。"""
+    return _artifact_at(_mtime(ART))
+
+
+# 每个已加载的 lolwp 模块对象第一次被看到时的文件修改时间。按模块对象记：
+# 万一 Streamlit 自己重载了某个模块，那是个新对象，不算过时
+_seen: dict[object, float] = {}
+
+
+def stale() -> list[str]:
+    """站点进程里已经过时的东西：加载之后磁盘上又改过的 lolwp 模块与比赛数据（silver）。
+
+    Streamlit 每次运行都重读页面脚本（views/*.py），但 import 过的库模块留在进程里不动。
+    改了代码不重启，就是「新页面 + 旧模块」：缺列报 KeyError（2026-10-24 实测撞上过）。
+    页面顶上据此提示重启。模型文件不在此列：它按修改时间自动重载（见 artifact）。
+    """
+    out = []
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if not (name.startswith("lolwp.") and f):
+            continue
+        try:
+            m = os.path.getmtime(f)
+        except OSError:
+            continue
+        if _seen.setdefault((name, id(mod)), m) != m:
+            out.append(name)
+    for path, label in ((SILVER, "比赛数据"),):
+        if path in _seen and os.path.exists(path) and os.path.getmtime(path) != _seen[path]:
+            out.append(f"{label} {path}")
+    return out
+
+
 def bt_snapshot():
-    """分层 BT 快照（选手实力分位用）。与 app.predict 用的是同一份 artifact。"""
+    """分层 BT 快照（选手实力分位用）。与 app.predict 用的是同一份 artifact，
+    跟着它换（app.predict 按 artifact 对象缓存重建后的快照）。"""
     from lolwp.app.predict import _bt_snapshot
 
     return _bt_snapshot(artifact())
@@ -54,6 +97,7 @@ def bt_snapshot():
 @st.cache_data(show_spinner=False)
 def games() -> pd.DataFrame:
     """tier≥1（含国际赛）全部比赛，新的在前。"""
+    _seen[SILVER] = os.path.getmtime(SILVER)
     g = pd.read_parquet(SILVER)
     return g[g.league_tier >= 1].sort_values("kickoff_utc", ascending=False)
 
@@ -88,9 +132,13 @@ def _logo_url(esports_id: str | None) -> str | None:
     return None
 
 
-@st.cache_resource(show_spinner=False)
 def rosters() -> dict[str, dict]:
-    """team_id → 各位置选手（含实力分位 / 模型是否见过）与默认首发。"""
+    """team_id → 各位置选手（含实力分位 / 模型是否见过）与默认首发。实力分位跟着模型文件换。"""
+    return _rosters_at(_mtime(ART))
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _rosters_at(art_mtime: float) -> dict[str, dict]:
     p = pd.read_parquet(BRONZE, columns=["gameid", "date", "teamid", "playerid",
                                          "playername", "position"])
     ro = catalog.build_rosters(p, teams())
@@ -103,13 +151,26 @@ def rosters() -> dict[str, dict]:
     return ro
 
 
-@st.cache_resource
 def poller():
-    """轮询器做成 cache_resource，才能跨 rerun 保持 watchlist 与计时状态。
+    """轮询器做成 cache_resource，才能跨 rerun 保持 watchlist 与计时状态；
+    模型文件换过就换上新 artifact（新快照只用于之后开打的局）。
 
     构建失败（网络不通、crosswalk 缺失）时返回 {"error": ...}，实时页整体降级为提示，
     **手动摆阵容不受任何影响**——实时是增强功能不是依赖。
     """
+    pol = _poller()
+    reload = getattr(pol, "reload_artifact_if_changed", None)
+    if reload is not None:
+        try:
+            reload()
+        except Exception as e:  # noqa: BLE001  换不上就接着用旧的，实时页照常
+            if note := getattr(pol, "_note_error", None):
+                note(f"artifact reload: {type(e).__name__}: {e}")
+    return pol
+
+
+@st.cache_resource
+def _poller():
     try:
         from lolwp.live.poller import build_default_poller
 

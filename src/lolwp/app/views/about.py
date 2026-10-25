@@ -12,17 +12,30 @@ from lolwp.models.artifact import LAYER_OF
 def render() -> None:
     art, champs = data.artifact(), data.champions()
     meta = art.meta
+    refit = meta.get("data_scope") == "all"
     ui.page_header("Model", "模型说明",
                    "BP（ban/pick）结束、开赛前，给出蓝色方的获胜概率。覆盖 tier-1 全部赛区与国际赛事，完全本地运行。",
                    [ui.pill(meta.get("model", "?"), "gold"),
                     ui.pill(f"训练至 {str(meta.get('trained_on'))[:10]}"),
+                    *([ui.pill(ui.ratings_note(meta) + (f"（含盯盘 {meta['n_live_games']} 场）"
+                                                       if meta.get("n_live_games") else ""), "green")]
+                      if ui.ratings_note(meta) else []),
+                    *([ui.pill("揭盲后全量重训", "green")] if refit else []),
                     ui.pill(f"{meta.get('n_train_games', 0):,} 场训练")])
 
+    # 下面四个成绩都是揭盲时评测的那个模型（训练截至 2026-05-31）的；全量重训的模型在 holdout 期是样本内的
+    whose = "评测对象是训练截至 2026-05-31 的模型（dev 口径）；当前的全量重训模型在 holdout 期是样本内的。" if refit else ""
     m = st.columns(4)
-    m[0].metric("Holdout log loss", "0.6165", help="989 场，一次性揭盲（git 437d1cb）")
-    m[1].metric("Walk-forward log loss", f"{meta.get('oos_log_loss', 0.61917):.4f}", help=meta.get("oos_note"))
-    m[2].metric("准确率", "65.3%", help="final holdout 989 场")
+    m[0].metric("Holdout log loss", "0.6165", help=f"989 场，一次性揭盲（git 437d1cb）。{whose}")
+    m[1].metric("Walk-forward log loss", f"{meta.get('oos_log_loss', 0.61917):.4f}",
+                help=f"{meta.get('oos_note')}。{whose}")
+    m[2].metric("准确率", "65.3%", help=f"final holdout 989 场。{whose}")
     m[3].metric("对照：Polymarket", "0.6275", help="同期 1,302 场的市场价格；与模型统计上无法区分")
+    if refit:
+        st.html(ui.note(
+            "当前模型是 holdout 揭盲之后、<b>同一规格用全量数据重训</b>的版本（预注册修订 A4）：上面几个成绩属于揭盲时"
+            "评测的那个训练截至 5/31 的模型；这个模型自己的样本外成绩，看「近期战绩」里它的训练截止日之后落盘的预测。",
+            "info", "ⓘ"))
 
     c1, c2 = st.columns([1.15, 1], gap="large")
     with c1:
@@ -62,7 +75,8 @@ def render() -> None:
     st.html(f'<div class="lw-card"><dl class="lw-kv">'
             f"<dt>比赛数据</dt><dd>Oracle's Elixir 2014–2026（训练截至 {ui.esc(str(meta.get('trained_on'))[:10])}，"
             f"状态机 {meta.get('n_state_games', 0):,} 场）</dd>"
-            f"<dt>holdout</dt><dd>{ui.esc(str(meta.get('holdout_start'))[:10])} 起，{ui.esc(meta.get('holdout_note', ''))}</dd>"
+            f"<dt>holdout</dt><dd>{ui.esc(str(meta.get('holdout_start'))[:10])} 起，{ui.esc(meta.get('holdout_note', ''))}"
+            + ("；揭盲之后生产模型改用全量数据重训，这段比赛已在训练集里" if refit else "") + "</dd>"
             f"<dt>英雄</dt><dd>Riot Data Dragon {ui.esc(champs['version'])}，{len(champs['list'])} 个</dd>"
             f"<dt>实时阵容</dt><dd>lolesports livestats（非官方接口，无 SLA）；"
             f"盯盘错过的局事后从赛程补录，标「赛后补录」</dd>"

@@ -3,15 +3,24 @@
 # 关键修正 vs 手册 v1.1：
 #   1. curl 从 stdin 继承会吞掉 while-read 的输入 → 显式 </dev/null
 #   2. curl -f 只拦 4xx/5xx；配额耗尽是 HTTP 200 + HTML，必须落地后自己查
+#   3. 当年文件每次都重下：OE 每天更新的是 Drive 上**同一个**文件。旧版「已存在就跳过」
+#      让 make data 从 2026-09-19 起再没拿到过新比赛（10/24 才发现，训练数据停在 9/18）。
+#      一月份连上一年一起重下（年底的比赛要到一月才补齐）。内容没变就不替换。
+#      要留作复现的旧快照自己拷到 data/raw/archive/（揭盲时的那份已经在那里）。
 set -uo pipefail
 UA="lolwp/1.0 (qxing@uchicago.edu)"
 RAW=data/raw
+CUR=$(date -u +%Y)
+MON=$(date -u +%m)
 mkdir -p "$RAW"
 fail=0
 while IFS=$'\t' read -r YEAR FID; do
   [ -z "${YEAR:-}" ] && continue
   OUT="$RAW/${YEAR}_LoL_esports_match_data_from_OraclesElixir.csv"
-  if [ -s "$OUT" ]; then echo "skip  $YEAR (已存在 $(wc -c < "$OUT") bytes)"; continue; fi
+  live=0
+  [ "$YEAR" = "$CUR" ] && live=1
+  [ "$MON" = "01" ] && [ "$YEAR" = "$((CUR - 1))" ] && live=1
+  if [ -s "$OUT" ] && [ "$live" = 0 ]; then echo "skip  $YEAR (已存在 $(wc -c < "$OUT") bytes)"; continue; fi
   echo "fetch $YEAR ..."
   curl -sSL --max-time 600 -A "$UA" \
     "https://drive.usercontent.google.com/download?id=${FID}&export=download&confirm=t" \
@@ -23,6 +32,9 @@ while IFS=$'\t' read -r YEAR FID; do
   fi
   if [ "$sz" -lt 1000000 ]; then
     echo "  FAIL $YEAR: 文件过小 ${sz} bytes"; mv "${OUT}.tmp" "${OUT}.bad"; fail=$((fail+1)); continue
+  fi
+  if [ -s "$OUT" ] && cmp -s "${OUT}.tmp" "$OUT"; then
+    echo "  same $YEAR：内容没变"; rm -f "${OUT}.tmp"; sleep 2; continue
   fi
   mv "${OUT}.tmp" "$OUT"
   echo "  ok   $YEAR ${sz} bytes"

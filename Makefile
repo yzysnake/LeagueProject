@@ -1,7 +1,7 @@
 PY := PYTHONPATH=src .venv/bin/python
 SNAPSHOT ?= latest
 
-.PHONY: help setup data bronze silver icons artifact app test lint gate monitor reproduce all
+.PHONY: help setup data bronze silver icons artifact refresh app test lint gate monitor reproduce all
 
 help:           ## 列出所有命令
 	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -9,7 +9,7 @@ help:           ## 列出所有命令
 setup:          ## 建 Python 3.11 环境并装依赖（首次）
 	uv sync --frozen
 
-data:           ## 下载 OE 年度 CSV 并做五重校验
+data:           ## 下载 OE 年度 CSV（当年文件每次重下）并做五重校验
 	bash scripts/day0_fetch.sh && $(PY) scripts/day0_validate.py
 
 bronze:         ## CSV → Parquet，物理丢弃 135 个赛后统计列
@@ -30,6 +30,9 @@ icons:          ## 下载 173 张英雄图标、中文名与现役战队队标�
 
 artifact:       ## 训练生产模型 BT4_LR 并打包（约 40 分钟，BT 需全量拟合）
 	$(PY) -m lolwp.models.artifact
+
+refresh:        ## 只重解实力快照（silver + 盯盘台账的新赛果，几秒）；盯盘每有新赛果会自动做
+	$(PY) -m lolwp.models.artifact --refresh
 
 app:            ## 启动本地站点（离线可用，进程内推理）
 	PYTHONPATH=src .venv/bin/streamlit run src/lolwp/app/main.py

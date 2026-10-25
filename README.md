@@ -42,6 +42,7 @@ make bronze     # → Parquet，物理丢弃 135 个赛后统计列
 make silver     # → 一场一行的建模宽表
 make icons      # 173 张英雄图标 + 中文名 + 现役战队队标，供离线 UI 使用
 make artifact   # 训练生产模型（约 40 分钟，分层 BT 要全量拟合）
+make refresh    # 只重解实力快照（silver + 盯盘台账的新赛果，几秒）；盯盘每有新赛果会自动做
 make app        # 启动本地站点
 ```
 
@@ -102,6 +103,14 @@ make up-online    # 额外起每日拉数与实时轮询
 - 实测：从 livestats 首次返回 200 到页面出概率 **0.221 秒**。
 
 ## 模型
+
+> **生产模型是揭盲之后用全量数据重训的版本**（预注册修订 A4）：同一规格，训练截止从 2026-05-31
+> 延到最新数据。上面的 walk-forward 与 holdout 成绩属于揭盲时评测的、训练截至 5/31 的模型；
+> 重训模型的样本外成绩看站点「近期战绩」里它训练截止日之后的预测。`--scope dev` 可重建评测时的模型。
+>
+> **实力快照不冻结**：外层系数随重训更新，分层 BT 快照则每有新赛果就重解（盯盘对账后自动 `make refresh`，
+> 数据 = silver + 台账里 OE 还没收录的局）。快照冻结一个月 log loss 就差 0.012，
+> 见 `reports/exp_model_improvements.md`。站点页脚的「实力更新至」就是它。
 
 **BT4_LR** = 按赛区收缩的 side 先验 + 分层 Bradley-Terry 三项（选手潜变量 /
 chemistry / 赛区校准）+ 两层经验贝叶斯的英雄版本强度，外层普通 L2 logistic。

@@ -101,9 +101,10 @@ def _iso(minute):
     return f"2026-10-07T21:{minute:02d}:00.000Z"
 
 
-def _frame(minute, state="in_game", b_inhib=0, r_inhib=0):
+def _frame(minute, state="in_game", b_inhib=0, r_inhib=0, b_gold=None, r_gold=None):
     return {"rfc460Timestamp": _iso(minute), "gameState": state,
-            "blueTeam": {"inhibitors": b_inhib}, "redTeam": {"inhibitors": r_inhib}}
+            "blueTeam": {"inhibitors": b_inhib, "totalGold": b_gold},
+            "redTeam": {"inhibitors": r_inhib, "totalGold": r_gold}}
 
 
 def _window(blue_id, red_id, end=30, winner=None):
@@ -119,7 +120,8 @@ def _window(blue_id, red_id, end=30, winner=None):
             return {"gameMetadata": md, "frames": [_frame(t)]}
         return {"gameMetadata": md, "frames": [_frame(end, "finished",
                                                        b_inhib=int(winner == "blue"),
-                                                       r_inhib=int(winner == "red"))]}
+                                                       r_inhib=int(winner == "red"),
+                                                       b_gold=61000, r_gold=52000)]}
     return payload
 
 
@@ -193,7 +195,8 @@ def test_reconcile_uses_feed_sides_not_event_sides(tmp_path, monkeypatch):
     fake = _FakeSession({"m1": _event(["g1", "g2"], (0, 2))},
                         {"g1": _window("B", "A", winner=None), "g2": _window("B", "A", winner="blue")})
     monkeypatch.setattr(requests, "Session", lambda: fake)
-    lw.reconcile()
+    monkeypatch.setattr(lw, "_resolver", lambda: None)
+    lw.reconcile(pause_s=0)
 
     res = {r["game_id"]: r for r in map(json.loads, ledger.read_text().splitlines())
            if r["kind"] == "result"}
@@ -219,7 +222,8 @@ def test_reconcile_backfills_old_results_without_touching_the_verdict(tmp_path, 
     fake = _FakeSession({"m1": _event(["g1", "g2"], (0, 2))},
                         {"g1": _window("B", "A", winner="blue"), "g2": _window("B", "A", winner="blue")})
     monkeypatch.setattr(requests, "Session", lambda: fake)
-    lw.reconcile()
+    monkeypatch.setattr(lw, "_resolver", lambda: None)
+    lw.reconcile(pause_s=0)
 
     _, results = lw._load_ledger()
     assert results["g1"]["blue_won"] is True and results["g1"]["ended_at"] == _iso(30)
@@ -389,3 +393,89 @@ def test_poller_measures_time_with_the_wall_clock():
 
     from lolwp.live.poller import Poller
     assert inspect.signature(Poller).parameters["now"].default is time.time
+
+
+# ---- 实力快照随赛果重解：对账记阵容、补录守住快照截止、重解失败不拖垮盯盘 ----
+
+class _FakeResolver:
+    """按 feed 的 esportsTeamId 拼出 OE id；A 的对照是 contested。"""
+    def resolve_window(self, payload, feed_league_name=None):
+        from types import SimpleNamespace as NS
+        md = payload["gameMetadata"]
+
+        def side(key):
+            tid = md[key]["esportsTeamId"]
+            return NS(oe_team_id=f"oe:team:{tid}", team_confidence="contested" if tid == "A" else "primary",
+                      player_ids=[f"oe:player:{tid}{i}" for i in range(5)])
+        return NS(league_canon="WLDs", blue=side("blueTeamMetadata"), red=side("redTeamMetadata"))
+
+
+def test_reconcile_records_lineup_and_final_gold(tmp_path, monkeypatch):
+    """对账把这局的 BP 后阵容解析成 OE id 写进 result（给实力快照重解），顺带记终局双方总经济。
+    已判出、缺阵容的老结果只补字段；补齐之后再对账一条都不追加。"""
+    import requests
+
+    lw = _load_lw()
+    ledger = tmp_path / "live_watch.jsonl"
+    old = [_pred("g1", "m1"), _pred("g2", "m1"),
+           {"kind": "result", "game_id": "g1", "blue_won": True, "p_blue": 0.4,
+            "started_at": _iso(0), "ended_at": _iso(30)}]          # 老结果：有时间、没阵容
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in old))
+    monkeypatch.setattr(lw, "LEDGER", str(ledger))
+    fake = _FakeSession({"m1": _event(["g1", "g2"], (0, 2))},
+                        {"g1": _window("B", "A", winner="blue"), "g2": _window("B", "A", winner="blue")})
+    monkeypatch.setattr(requests, "Session", lambda: fake)
+    assert lw.reconcile(_FakeResolver(), quiet=True, pause_s=0) == 2   # g2 新判出 + g1 补阵容
+
+    _, res = lw._load_ledger()
+    for gid in ("g1", "g2"):
+        r = res[gid]
+        assert r["blue_won"] is True and r["league_canon"] == "WLDs"
+        assert (r["blue_oe_team"], r["blue_team_conf"]) == ("oe:team:B", "primary")
+        assert (r["red_oe_team"], r["red_team_conf"]) == ("oe:team:A", "contested")
+        assert r["blue_oe_players"] == [f"oe:player:B{i}" for i in range(5)]
+        assert (r["blue_gold"], r["red_gold"]) == (61000, 52000)
+    n_lines = len(ledger.read_text().splitlines())
+    assert lw.reconcile(_FakeResolver(), quiet=True, pause_s=0) == 0
+    assert len(ledger.read_text().splitlines()) == n_lines
+
+
+def test_backfill_skips_games_older_than_the_rating_snapshot(tmp_path, monkeypatch):
+    """快照重解之后，开局早于快照里最晚一局终局的局不补：补出来的预测会用上它开打之后的赛果。"""
+    lw, ledger, s, pol, since = _backfill_world(tmp_path, monkeypatch)
+    pol.artifact.meta["ratings_cutoff"] = "2026-10-15 19:00:00+00:00"   # g1（18:16）之后、g2 之前
+    assert lw.backfill(pol, s, since, league="Worlds", pause_s=0) == 1
+    ids = [json.loads(x)["game_id"] for x in ledger.read_text().splitlines()]
+    assert ids == ["g2"]
+
+
+def test_record_carries_the_ratings_snapshot():
+    lw = _load_lw()
+    r = lw._record({"game_id": "g"}, {"p_blue": 0.5}, "BT4_LR@2026-09-18", "2026-10-24 21:30")
+    assert (r["model"], r["ratings"]) == ("BT4_LR@2026-09-18", "2026-10-24 21:30")
+
+
+def test_refresh_ratings_swaps_the_artifact_and_never_raises(capsys):
+    """有新快照就换上并报一句；没新比赛不出声；重解出错只打日志——盯盘不能因此停。"""
+    from types import SimpleNamespace as NS
+
+    lw = _load_lw()
+
+    class Pol:
+        def __init__(self):
+            self.artifact, self.swaps = NS(meta={"ratings_as_of": "2026-09-18 23:20:30+00:00"}), 0
+
+        def reload_artifact_if_changed(self):
+            self.swaps += 1
+            self.artifact = NS(meta={"ratings_as_of": "2026-10-24 21:00:01+00:00", "n_live_games": 57})
+            return True
+
+    pol = Pol()
+    msg = lw._refresh_ratings(pol, refresh=lambda: object())
+    assert "2026-10-24 21:00" in msg and "57" in msg and pol.swaps == 1
+    assert lw._refresh_ratings(pol, refresh=lambda: None) is None and pol.swaps == 1
+
+    def boom():
+        raise ValueError("bad silver")
+    assert lw._refresh_ratings(pol, refresh=boom) is None
+    assert "bad silver" in capsys.readouterr().out
