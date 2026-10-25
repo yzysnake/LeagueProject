@@ -18,6 +18,7 @@ import pandas as pd
 from lolwp.features.draft_priors import draft_features_from_state
 from lolwp.features.priors import features_from_state
 from lolwp.models.artifact import LAYER_OF, Artifact
+from lolwp.models.form import form_at
 from lolwp.models.hier_bt import HierBTSnapshot
 
 # 特征的展示名。站点与 API（/predict 的 contributions[].label）共用这一份。
@@ -27,6 +28,7 @@ FEATURE_LABELS = {
     "bt_chem_diff": "队伍配合残差",
     "bt_league_diff": "赛区强度差",
     "champ_meta_diff": "英雄版本强度差",
+    "form_diff": "近期状态差（最近几局的超预期）",
     "team_elo_diff": "队伍 Elo 差",
     "player_elo_diff": "选手 Elo 差",
 }
@@ -131,6 +133,11 @@ def predict(art: Artifact, d: Draft) -> Prediction:
         c = w * x
         contrib[name] = c
         z += c
+    # 第二层：近期状态（models.form）。两队最近几局「赛果 − 模型预期」之差 × β，只用开赛早于 d.now 的局
+    if form := art.prior_state.get("form"):
+        f["form_diff"] = form_at(form, d.blue_team_id, d.now) - form_at(form, d.red_team_id, d.now)
+        contrib["form_diff"] = float(form["beta"]) * f["form_diff"]
+        z += contrib["form_diff"]
     layers: dict[str, float] = {}
     for name, c in contrib.items():
         layers[LAYER_OF[name]] = layers.get(LAYER_OF[name], 0.0) + c

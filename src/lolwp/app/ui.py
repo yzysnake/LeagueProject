@@ -337,7 +337,8 @@ def _sig(z: float) -> float:
 
 # 瀑布与各页「x 层」卡片共用的口径：从截距出发，按这个顺序逐层加上去
 LAYER_ORDER = ("赛况", "实力", "阵容")
-LAYER_HINT = {"赛况": "蓝方先验（按赛区收缩）", "实力": "选手实力 · 配合 · 赛区强度", "阵容": "五个英雄的版本强度"}
+LAYER_HINT = {"赛况": "蓝方先验（按赛区收缩）", "实力": "选手实力 · 配合 · 赛区强度 · 近期状态",
+              "阵容": "五个英雄的版本强度"}
 
 
 def layer_steps(intercept: float, layers: dict[str, float]) -> dict[str, float]:

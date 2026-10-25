@@ -11,14 +11,19 @@ artifact 是自描述的（PLAN.md §4.7.2）：里面记着训练数据范围�
 **快照的训练标签是赛后经济差的软标签**（全量口径，预注册修订 A6，`models.margin`）：
 同一个 BT、同一组外层特征，似然里的 y 从胜负换成 σ(0.5·终局经济差 / 10 分钟)，验收段 +0.00390。
 用的是哪个标签记在 `meta.rating_target`；refresh 照它重解，不会把软标签快照换回胜负快照。
+
+**外层之上还有一层近期状态**（全量口径，`models.form`，reports/exp_model_improvements.md §3）：
+logit 再加 β ·（两队最近几局「赛果 − 模型预期」之差），状态存在 `prior_state["form"]`——
+放在已有的 dict 里而不是新加一个字段，正在跑的旧代码照样读得了新 artifact（只是不加这一层）。
 """
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 ARTIFACT_DIR = "models"
@@ -36,6 +41,12 @@ OOS_WIN = {"oos_log_loss": 0.61650,
 OOS_MARGIN = {"oos_log_loss": 0.61259,
               "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场，3 天网格、赛后经济差软标签"
                           "（scripts/exp_margin_bt.py，reports/exp_model_improvements.md §2）"}
+OOS_FORM = {"oos_log_loss": 0.61167,
+            "oos_note": "walk-forward OOS, tier>=1, 2019 起, 23,060 场，3 天网格、赛后经济差软标签 + 近期状态第二层"
+                        "（scripts/exp_form.py，reports/exp_model_improvements.md §3）"}
+# 近期状态的 β 只在这之后的 tier>=1 局上拟合：与 exp_form 验收段的走前向同一段（调参段的 β 明显更大，时代不同）
+FORM_SINCE = "2019-01-01"
+FORM_KEEP_DAYS = 730          # 两年没打过比赛的队不带进 artifact
 # 产品模型 = BT4_LR（阶段 8 对比表：7 个候选里无一在 MDE 之上胜出）。
 #   · 分层 BT 的选手潜变量取代了 team_elo / player_elo——阶段 8 消融实测，
 #     有了 bt_player 之后拿掉那两列毫无影响（−0.00004 / −0.00016，均低于 MDE），
@@ -52,6 +63,7 @@ LAYER_OF = {
     "bt_chem_diff": "实力",
     "bt_league_diff": "实力",
     "champ_meta_diff": "阵容",
+    "form_diff": "实力",            # 第二层：近期状态（models.form），不在外层五个特征里
 }
 
 
@@ -129,6 +141,33 @@ def _rating_snapshot(games: pd.DataFrame, live: pd.DataFrame, cfg, warm=None, ta
     return snap, meta
 
 
+def _live_form(live: pd.DataFrame) -> dict[str, list[list]]:
+    """台账那部分的近期状态条目：tier>=1、有开赛前落盘预测的局，残差用当时的预测（ledger.live_games 的 p_pre）。"""
+    from lolwp.models.form import DEFAULT, form_entries
+
+    lv = live[(live.league_tier >= 1) & live.p_pre.notna()] if len(live) else live
+    return form_entries(lv, lv.p_pre.to_numpy(dtype=float), DEFAULT) if len(lv) else {}
+
+
+def _form_state(games: pd.DataFrame, z: np.ndarray, live: pd.DataFrame) -> dict[str, Any]:
+    """近期状态第二层（models.form，reports/exp_model_improvements.md §3）的 β 与推理状态。
+
+    games 是外层的训练局（tier>=1，按开赛升序），z 是外层在它们上的 logit。OE 那部分的残差用外层的样本内预测：
+    5 个参数拟 3.6 万场，样本内外差在 1e-4 量级；分层 BT 特征本身是 as-of 的，残差里没有赛果泄漏。
+    台账那部分用开赛前落盘的预测（_live_form），每次 refresh 重建。
+    """
+    from lolwp.models.form import DEFAULT, fit_beta, form_diff, form_entries
+
+    g = games.reset_index(drop=True)
+    p = 1.0 / (1.0 + np.exp(-z))
+    y = g.y_blue_win.to_numpy(dtype=float)
+    recent = (g.kickoff_utc >= pd.Timestamp(FORM_SINCE, tz="UTC")).to_numpy()
+    beta = fit_beta(z[recent], form_diff(g, p, DEFAULT)[recent], y[recent])
+    since = g.kickoff_utc.max() - pd.Timedelta(days=FORM_KEEP_DAYS)
+    return {"cfg": asdict(DEFAULT), "beta": float(beta), "n_fit": int(recent.sum()),
+            "silver": form_entries(g, p, DEFAULT, since), "live": _live_form(live)}
+
+
 def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Artifact:
     """训练并打包生产模型。
 
@@ -170,6 +209,10 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Arti
     mu, sd = X.mean(0), X.std(0)
     sd[sd == 0] = 1.0
     clf = LogisticRegression(C=1.0, solver="lbfgs", max_iter=2000).fit((X - mu) / sd, y)
+    # 第二层：近期状态（只给全量口径；dev 口径原样复现揭盲时评测的模型）
+    form = _form_state(full.loc[m], clf.decision_function((X - mu) / sd), live) if scope == "all" else None
+    if form is not None:
+        st1["form"] = form
 
     art = Artifact(
         coef=dict(zip(PROD_FEATURES, clf.coef_[0].tolist())),
@@ -182,14 +225,15 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Arti
         # 与训练**同一个函数**，这是 §7.4 防 train-serve skew 的关键。
         bt_state=bt_snap.to_dict(),
         meta={
-            # 规格名跟着快照标签走：台账按它区分新旧规格的预测（同一个训练截止日也分得开）
-            "model": "BT4_LR+MOV" if target == MARGIN_TARGET else "BT4_LR",
+            # 规格名跟着快照标签与第二层走：台账按它区分新旧规格的预测（同一个训练截止日也分得开）
+            "model": "BT4_LR+MOV+FORM" if form is not None else "BT4_LR+MOV" if target == MARGIN_TARGET
+                     else "BT4_LR",
             "trained_on": str(full.kickoff_utc.max()),
             "n_train_games": int(m.sum()),
             "n_state_games": len(full),
             "holdout_start": str(full.attrs.get("holdout_start")),
             # walk-forward 是本规格（网格、标签）在开发期的成绩；holdout 属于揭盲时评测的 dev 口径模型
-            **(OOS_MARGIN if target == MARGIN_TARGET else OOS_WIN),
+            **(OOS_FORM if form is not None else OOS_MARGIN if target == MARGIN_TARGET else OOS_WIN),
             "holdout_log_loss": 0.61653,
             "holdout_note": "final holdout 989 场，一次性揭盲于 git 437d1cb（reports/final_technical_report.md §7）；"
                             "评测对象是 dev 口径（胜负标签、训练截至 2026-05-31）的模型",
@@ -197,11 +241,14 @@ def train(out: str = f"{ARTIFACT_DIR}/prod.json", *, scope: str = "all") -> Arti
             "data_scope": scope,
             "rating_target": target,
             **({"margin_kappa": MARGIN_KAPPA} if target == MARGIN_TARGET else {}),
+            **({"form_beta": form["beta"], "form_half_life_games": form["cfg"]["half_life_games"]}
+               if form is not None else {}),
             # 实力快照的新鲜度：refresh() 之后这几项会变，外层系数与 trained_on 不变
             **fresh, "ratings_n_games": len(games),
-            **({"refit_note": "揭盲后的生产重训（预注册修订 A4）：外层规格不变、全量数据；实力快照的训练标签"
-                              "改为赛后经济差软标签（修订 A6）。walk-forward 是本规格在开发期的成绩，holdout 是"
-                              "揭盲时评测的 dev 口径模型的成绩；本模型自己的样本外成绩看盯盘台账。"}
+            **({"refit_note": "揭盲后的生产重训（预注册修订 A4）：外层五个特征不变、全量数据；实力快照的训练标签"
+                              "改为赛后经济差软标签（修订 A6）；外层之上加近期状态第二层（修订 A7）。walk-forward "
+                              "是本规格在开发期的成绩，holdout 是揭盲时评测的 dev 口径模型的成绩；本模型自己的"
+                              "样本外成绩看盯盘台账。"}
                if scope == "all" else {}),
         },
     )
@@ -238,6 +285,8 @@ def refresh(path: str = f"{ARTIFACT_DIR}/prod.json", *, ledger: str | None = LIV
         return None
     snap, fresh = _rating_snapshot(games, live, old.cfg, warm=old, target=target)
     art.bt_state = snap.to_dict()
+    if "form" in art.prior_state:          # 近期状态：台账那部分跟着重建，β 与 OE 那部分不动
+        art.prior_state["form"]["live"] = _live_form(live)
     art.meta.update(fresh, ratings_n_games=len(games),
                     ratings_refreshed_at=str(pd.Timestamp.now(tz="UTC").floor("s")))
     if os.path.getmtime(path) != m0:

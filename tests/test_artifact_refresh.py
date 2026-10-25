@@ -217,3 +217,24 @@ def test_refresh_keeps_the_margin_target(tmp_path, monkeypatch):
     win, _ = A._rating_snapshot(games, live, HierBTConfig(refit_every_days=3))
     gap = lambda a, b: max(abs(a.r_player[p] - b.r_player[p]) for p in b.r_player)
     assert gap(snap, cold) < 1e-4 and gap(snap, win) > 1e-3
+
+
+def test_refresh_rebuilds_the_live_part_of_the_form_layer(world, tmp_path):
+    """近期状态：β 与 OE 那部分训练时定死，台账那部分每次重解时按开赛前落盘的预测重建（只收 tier>=1 的局）。"""
+    silver, path, _, _ = world
+    d = json.loads(path.read_text())
+    d["prior_state"]["form"] = {"cfg": {"half_life_games": 5.0, "prior_games": 3.0, "window": 60,
+                                        "include_series": True},
+                                "beta": 0.7, "silver": {"keep": [["2026-01-01T00:00:00+00:00", 0.1]]}, "live": {}}
+    path.write_text(json.dumps(d))
+    last = silver.kickoff_utc.max()
+    ledger = _ledger(tmp_path / "led.jsonl", [
+        (f"g{i}", (last + pd.Timedelta(days=1, hours=i)).isoformat(), TEAMS[0], TEAMS[i + 1], True,
+         _roster(TEAMS[0]), "LCK") for i in range(2)])
+    with open(ledger, "a") as fh:                                     # 只有 g0 有开赛前的预测
+        fh.write(json.dumps({"kind": "prediction", "game_id": "g0", "p_blue": 0.66, "p_base": 0.6}) + "\n")
+    new = A.refresh(str(path), ledger=ledger)
+    form = new.prior_state["form"]
+    assert form["beta"] == 0.7 and form["silver"] == {"keep": [["2026-01-01T00:00:00+00:00", 0.1]]}
+    assert set(form["live"]) == {TEAMS[0], TEAMS[1]}
+    assert form["live"][TEAMS[0]][0][1] == pytest.approx(1 - 0.6)      # 蓝方赢了，残差 = 1 − p_base

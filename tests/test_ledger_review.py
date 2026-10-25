@@ -233,3 +233,18 @@ def test_live_games_margin_label_from_final_gold(tmp_path):
     df = live_games(_silver(), _write(tmp_path, [gold, no_gold])).set_index("game_id")
     assert df.loc["live:g", "y_margin"] == pytest.approx(margin_target([1], [60_000], [52_000], [1_800])[0])
     assert df.loc["live:h", "y_margin"] == 0.0
+
+
+def test_live_games_carry_the_pre_game_probability(tmp_path):
+    """近期状态的残差用开赛前落盘的概率：有 p_base（加近期状态之前）用它，老记录用 p_blue，没预测的局 NaN。"""
+    import math
+
+    from lolwp.live.ledger import live_games
+
+    rows = [dict(_pred("a", 0.61, ["T1", "BLG"], "T1", "BLG"), p_base=0.58),
+            _lineup("a", "2026-10-20T10:00:00.000Z"),
+            _pred("b", 0.4, ["T1", "BLG"], "T1", "BLG"), _lineup("b", "2026-10-20T11:00:00.000Z"),
+            _lineup("c", "2026-10-20T12:00:00.000Z")]
+    df = live_games(_silver(), _write(tmp_path, rows)).set_index("game_id")
+    assert df.loc["live:a", "p_pre"] == 0.58 and df.loc["live:b", "p_pre"] == 0.4
+    assert math.isnan(df.loc["live:c", "p_pre"])
