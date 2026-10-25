@@ -480,3 +480,58 @@ def test_refresh_ratings_swaps_the_artifact_and_never_raises(capsys):
         raise ValueError("bad silver")
     assert lw._refresh_ratings(pol, refresh=boom) is None
     assert "bad silver" in capsys.readouterr().out
+
+
+def _results_world(tmp_path, monkeypatch, ledger_rows=()):
+    from datetime import UTC, datetime
+
+    lw = _load_lw()
+    ledger = tmp_path / "live_watch.jsonl"
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in ledger_rows))
+    monkeypatch.setattr(lw, "LEDGER", str(ledger))
+    lw._SKIP_RESULTS.clear()
+    pages = [[_sched_event("m1", "2026-10-07T20:00:00Z")]]
+    events = {"m1": _details("m1", [("g1", "completed"), ("g2", "completed"), ("g3", "completed"),
+                                    ("g4", "unneeded")])}
+    windows = {"g1": _window("B", "A", winner="blue"), "g2": _window("B", "A", winner="red"),
+               "g3": _window("B", "A", winner=None)}                 # g3：没有终局帧、系列比分也推不出
+    s = _SchedSession(pages, events, windows)
+    kw = {"trained_on": datetime(2026, 9, 18, tzinfo=UTC), "cutoff": datetime(2026, 10, 25, tzinfo=UTC),
+          "pause_s": 0, "feed_pause_s": 0}
+    return lw, ledger, s, datetime(2026, 10, 1, tzinfo=UTC), kw
+
+
+def test_backfill_results_records_rating_only_games(tmp_path, monkeypatch):
+    """开局早于快照截止的漏局补不了预测，只补赛果：没有预测的 result（rating_only），带阵容与终局经济；
+    台账里已有的（g2 有预测）、判不出胜负的（g3）、unneeded（g4）都不写；再跑一遍不重复。"""
+    lw, ledger, s, since, kw = _results_world(tmp_path, monkeypatch, [_pred("g2", "m1")])
+    assert lw.backfill_results(s, since, _FakeResolver(), **kw) == 1
+    rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+    r = rows[-1]
+    assert (r["kind"], r["game_id"], r["match_id"], r["rating_only"]) == ("result", "g1", "m1", True)
+    assert r["blue_won"] is True and r["source"] == "feed" and (r["blue_team"], r["red_team"]) == ("BBB", "AAA")
+    assert (r["blue_oe_team"], r["blue_gold"], r["started_at"]) == ("oe:team:B", 61000, _iso(0))
+    assert not any(x["kind"] == "prediction" and x["game_id"] == "g1" for x in rows)
+    assert lw.backfill_results(s, since, _FakeResolver(), **kw) == 0
+    assert len(ledger.read_text().splitlines()) == len(rows)
+
+
+def test_backfill_results_only_inside_the_training_to_snapshot_window(tmp_path, monkeypatch):
+    """开局晚于快照截止的局归补录预测（backfill）；早于训练截止的 OE 里已经有了：两头都不写。"""
+    from datetime import UTC, datetime
+
+    lw, ledger, s, since, kw = _results_world(tmp_path, monkeypatch)
+    assert lw.backfill_results(s, since, _FakeResolver(), **{**kw, "cutoff": datetime(2026, 10, 7, 20, tzinfo=UTC)}) == 0
+    lw._SKIP_RESULTS.clear()
+    assert lw.backfill_results(s, since, _FakeResolver(),
+                               **{**kw, "trained_on": datetime(2026, 10, 7, 22, tzinfo=UTC)}) == 0
+    assert ledger.read_text() == ""
+
+
+def test_rating_only_results_stay_out_of_the_review_page(tmp_path):
+    """「近期战绩」只看有预测的局：只补赛果的局不出现在复盘表里，也不进命中率。"""
+    from lolwp.live.ledger import load_review
+
+    p = tmp_path / "live_watch.jsonl"
+    p.write_text(json.dumps({"kind": "result", "game_id": "x", "rating_only": True, "blue_won": True}) + "\n")
+    assert load_review(str(p)).empty

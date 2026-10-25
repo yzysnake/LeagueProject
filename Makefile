@@ -62,7 +62,7 @@ watch:          ## 实时盯盘：抓 BP 后阵容出正式预测，落盘供赛
 reconcile:      ## 赛后对账：预测 vs 实际，输出命中率 / log loss / Brier
 	$(PY) scripts/live_watch.py --reconcile
 
-backfill:       ## 赛后补录盯盘错过的局（停摆 / 合盖睡眠），可选 DAYS=14 LEAGUE=Worlds
+backfill:       ## 补录盯盘错过的局：能补预测的补预测，早于快照截止的只补赛果进实力快照；可选 DAYS=14 LEAGUE=Worlds
 	$(PY) scripts/live_watch.py --backfill --days $(or $(DAYS),14) $(if $(LEAGUE),--league "$(LEAGUE)")
 
 install-watch:  ## 把盯盘挂成 launchd（崩溃自动重启，关终端不影响）

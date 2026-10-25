@@ -1,6 +1,28 @@
 {
-  "selected": "hl5_series",
-  "passed": true,
+  "per_window": {
+    "n_games": 23060,
+    "n_series": 12274,
+    "log_loss_base": 0.6125927319797454,
+    "log_loss_cand": 0.6117277616120657,
+    "delta": 0.0008649703676798373,
+    "mde": 0.0008667044472336485,
+    "t_clustered": 2.794397833348878,
+    "half_1": 0.0006438049322637651,
+    "half_2": 0.0010861358030959097,
+    "passed": false,
+    "ece_base": 0.009537175051079353,
+    "ece_cand": 0.010414021707205953,
+    "slope_base": 1.0037253549230356,
+    "slope_cand": 0.9985277471305416,
+    "picks": {
+      "hl5_series": 83,
+      "hl5_noseries": 7
+    },
+    "protocol": "per-window"
+  },
+  "passed": false,
+  "tune_selected": "hl5_series",
+  "tune_selected_passed": true,
   "segments": {
     "tune": {
       "hl5_series": {

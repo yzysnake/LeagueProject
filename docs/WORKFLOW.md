@@ -110,6 +110,18 @@ preds = run_ladder(dev, feats, folds, names=["BASE", "CAND"])
 
 90 折 rolling-origin，series 级分组，7 天 embargo。
 
+**候选有几个设定时（半衰期、收缩强度……），逐折滚动选，不要挑验收段上最好的那个报**（修订 A8）：
+
+```python
+from lolwp.eval.gate import select_and_gate
+r = select_and_gate({"事先最合理的设定": p1, "设定 2": p2, ...}, p_base, y, fold, kick, series)
+```
+
+每个 fold 开打之前只看它之前 2 年的 OOS 表现挑设定：永远贴着当前版本，又从不看被打分的那一折。
+在整个验收段上挑最好的再报它，等于报了最走运的那个，会高估；A8 之前的做法（在 2016–2018 上选一次、
+2019 起确认）会被版本演变带偏——只会偏保守，但会错杀、也会选错设定。字典里第一个放事先最合理的设定，
+窗口里历史不足时用它。现成的例子：`scripts/exp_form.py`、`scripts/exp_margin_bt.py`、`ops/backlog._stack_gate`。
+
 ### 第四步 · 该比较自己的 MDE
 
 ```python
@@ -240,7 +252,10 @@ make backfill DAYS=30 LEAGUE=Worlds
 第 1 局的赛果赶在第 2 局 BP 结束、出预测之前进去（局间约 10 分钟）。
 
 两条代价，都是刻意的：首次重解之前没补的局（10/25 时其他赛区约 530 局，EMEA Masters、WSCI、DCGI 居多）
-不能再补成预测；它们的赛果对快照仍有用，留作后续（只记赛果、不出预测）。
+不能再补成预测。但它们的赛果对快照仍有用，所以补录分两种：开局晚于快照截止的照旧补预测；开局在
+（训练截止, 快照截止]之间的**只补赛果**——写成没有预测的 result（`rating_only: true`，阵容、胜负、终局经济俱全），
+「近期战绩」不看它，`live_games` 照常收进快照。`make backfill DAYS=38` 一次补齐 9/18 之后的；
+盯盘启动与醒来时也会自动补。
 状态机（side 先验、英雄版本强度）不跟着台账重解：它们要 patch 与选手英雄计数，变化也慢，跟 `make artifact` 走。
 
 **看成绩**：网站「近期战绩」页（或 `make reconcile` 的汇总）。按比赛日 / 赛事筛，
