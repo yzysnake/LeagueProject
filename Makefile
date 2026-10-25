@@ -15,8 +15,9 @@ data:           ## 下载 OE 年度 CSV（当年文件每次重下）并做五�
 bronze:         ## CSV → Parquet，物理丢弃 135 个赛后统计列
 	$(PY) -m lolwp.store.bronze
 
-silver:         ## 折叠为一场一行 + 赛区归一 + series_id + patch + crosswalk
+silver:         ## 折叠为一场一行 + 赛区归一 + series_id + patch + crosswalk；另建赛后经济差表（只当 BT 标签）
 	$(PY) -m lolwp.store.silver
+	$(PY) -m lolwp.store.margins
 
 icons:          ## 下载 173 张英雄图标、中文名与现役战队队标，供离线使用
 	$(PY) -m lolwp.ingest.ddragon zh

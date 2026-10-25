@@ -14,28 +14,37 @@ import json
 import os
 from dataclasses import asdict
 
+import numpy as np
 import pandas as pd
 
 CACHE_DIR = "data/cache/bt"
+_WIN = "y_blue_win"
 
 
-def _fingerprint(df: pd.DataFrame, cfg) -> str:
-    """数据指纹用 (行数, 时间范围, game_id 的 sha) —— 不读全表内容，够用且快。"""
+def _fingerprint(df: pd.DataFrame, cfg, target: str = _WIN) -> str:
+    """数据指纹用 (行数, 时间范围, game_id 的 sha) —— 不读全表内容，够用且快。
+
+    胜负标签不进指纹（加 target 参数之前的缓存照样命中；胜负跟着 game_id 走，不会单独变）。
+    其余目标（赛后经济差软标签）由数据算出来、可能随数据修正而变，**连同取值的 sha 一起**进指纹。
+    """
     h = hashlib.sha256()
     h.update(str(len(df)).encode())
     h.update(str(df.kickoff_utc.min()).encode())
     h.update(str(df.kickoff_utc.max()).encode())
     h.update(hashlib.sha256("|".join(df.game_id.astype(str)).encode()).digest())
     h.update(json.dumps(asdict(cfg), sort_keys=True, default=str).encode())
+    if target != _WIN:
+        h.update(target.encode())
+        h.update(hashlib.sha256(np.round(df[target].to_numpy(dtype=float), 9).tobytes()).digest())
     return h.hexdigest()[:16]
 
 
 def rolling_ratings_cached(df: pd.DataFrame, cfg=None, *, cache_dir: str = CACHE_DIR,
-                           force: bool = False) -> pd.DataFrame:
+                           force: bool = False, target: str = _WIN) -> pd.DataFrame:
     from lolwp.models.hier_bt import HierBTConfig, rolling_ratings
 
     cfg = cfg or HierBTConfig()
-    key = _fingerprint(df, cfg)
+    key = _fingerprint(df, cfg, target)
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, f"{key}.parquet")
     if os.path.exists(path) and not force:
@@ -43,7 +52,7 @@ def rolling_ratings_cached(df: pd.DataFrame, cfg=None, *, cache_dir: str = CACHE
         if len(out) == len(df):
             out.index = df.index
             return out
-    out = rolling_ratings(df, cfg)
+    out = rolling_ratings(df, cfg, target=target)
     tmp = path + ".tmp"
     out.reset_index(drop=True).to_parquet(tmp, index=False)
     os.replace(tmp, path)

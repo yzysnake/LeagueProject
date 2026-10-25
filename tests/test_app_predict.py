@@ -148,3 +148,6 @@ def test_artifact_scope_respects_the_holdout(art):
         assert art.meta["data_scope"] == "all"
         assert os.path.exists("reports/final_holdout_result.json"), "揭盲之前不许用全量数据训生产模型"
         assert "refit_note" in art.meta
+        # 修订 A6：全量口径的实力快照用赛后经济差软标签；规格名跟着标签走，台账靠它区分新旧规格
+        assert art.meta.get("rating_target") == "y_margin" and art.meta["model"] == "BT4_LR+MOV"
+        assert art.bt_state["diagnostics"]["target"] == "y_margin"

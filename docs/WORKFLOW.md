@@ -36,7 +36,7 @@ CatBoost 显著更差，DeepSet 加不动，分组 L2 与普通 L2 无差别，�
 ```bash
 make data        # 拉 OE 年度 CSV + 五重校验（当年文件每次重下，内容没变不替换）
 make bronze      # CSV → Parquet，物理丢弃 135 个赛后统计列
-make silver      # 12 行折叠成 1 行 + 赛区归一 + series_id + patch + crosswalk
+make silver      # 12 行折叠成 1 行 + 赛区归一 + series_id + patch + crosswalk；另建赛后经济差表
 make artifact    # 训练打包（约 40 分钟，分层 BT 要全量拟合）
 make app         # 起站点
 ```
@@ -65,8 +65,9 @@ make gate        # 注入退化模型，门禁必须拒绝它
 | raw | `data/raw/*.csv` 约 700 MB | 五重校验，配额错误页会伪装成 HTTP 200 |
 | bronze | `data/bronze/*.parquet` 31 MB | **物理丢弃赛后列**，想泄漏都拿不到 |
 | silver | `data/silver/games.parquet` 10 MB | 一场一行，`game_id.nunique() == len(df)` 是硬断言 |
+| 经济差表 | `data/silver/margins.parquet` | 终局双方总经济与时长，**只当历史局的 BT 标签**（修订 A6），从不并进特征 |
 | 特征 | 三个状态机的产出 | 全部 as-of：先读状态写特征，再用赛果更新 |
-| artifact | `models/prod.json` 10.7 MB | 自描述，服务启动时断言与代码版本一致 |
+| artifact | `models/prod.json` 10.7 MB | 自描述，服务启动时断言与代码版本一致；`meta.rating_target` 记快照用的标签 |
 
 ---
 
@@ -229,6 +230,8 @@ make backfill DAYS=30 LEAGUE=Worlds
 （primary；contested 的要至少 3 名选手 OE 里最近一年最后效力的就是这支队——2026 世界赛的 MVK 就是这种），
 胜负判得出，开局晚于 silver 里该赛区最后一场 + 30 分钟、且 silver 里没有同一对队伍前后 30 分钟内开的局。
 `artifact.refresh()` 在 silver + 这些局上重解快照（10/25 首次：61 场、1.3 秒，与从零重解差 2e-5），
+标签与训练时一致（`meta.rating_target`；生产是赛后经济差软标签，台账的局用对账记下的 feed 终局总经济、
+时长 = 终局 − 首帧，实测与 OE 同一量级：胜方软标签中位数 0.85 vs 0.84，时长中位数 31.4 vs 31.5 分钟），
 写回 `models/prod.json`；外层系数、其余状态、`trained_on` 都不动，meta 里记 `ratings_as_of` /
 `ratings_cutoff` / `n_live_games`，台账每条预测记 `ratings`（当时快照的时刻）。
 

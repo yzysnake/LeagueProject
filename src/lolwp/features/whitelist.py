@@ -25,17 +25,24 @@ LABEL_ONLY: frozenset[str] = frozenset({"result"})
 # 只能记录，不能进特征：datacompleteness 与赛区强相关，进特征等于偷偷泄漏赛区
 RECORD_ONLY: frozenset[str] = frozenset({"datacompleteness", "url"})
 
+# 只能当**历史局**的 rating 标签（分层 BT 的赛后经济差软标签，预注册修订 A6）：
+# 本局的这两列照旧绝不能进本局特征，也不进 bronze——store/margins.py 从原始 CSV 单独读出，
+# 存成 data/silver/margins.parquet，只在拟合「开赛早于快照时刻」的比赛时当 y 用。
+RATING_LABEL: frozenset[str] = frozenset({"totalgold", "gamelength"})
+
 FORBIDDEN_RE = re.compile(r"(at10|at15|at20|at25)$|^(opp_|golddiff|xpdiff|csdiff)")
 
 
 def classify(col: str) -> str:
-    """返回 allowed / label_only / record_only / forbidden。"""
+    """返回 allowed / label_only / record_only / rating_label / forbidden。"""
     if col in LABEL_ONLY:
         return "label_only"
     if col in RECORD_ONLY:
         return "record_only"
     if col in ALLOWED_RAW:
         return "allowed"
+    if col in RATING_LABEL:
+        return "rating_label"
     return "forbidden"
 
 
@@ -47,7 +54,8 @@ def check_feature_columns(cols: list[str]) -> None:
 
 
 def split_raw_columns(all_cols: list[str]) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {"allowed": [], "label_only": [], "record_only": [], "forbidden": []}
+    out: dict[str, list[str]] = {"allowed": [], "label_only": [], "record_only": [],
+                                 "rating_label": [], "forbidden": []}
     for c in all_cols:
         out[classify(c)].append(c)
     return out

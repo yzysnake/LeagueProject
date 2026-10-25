@@ -50,7 +50,7 @@ def test_all_seven_endpoints_exist():
 
 def test_health_reports_model_and_data_scale(client):
     h = client.get("/health").json()
-    assert h["ok"] and h["model_version"] == "BT4_LR"
+    assert h["ok"] and h["model_version"] in {"BT4_LR", "BT4_LR+MOV"}   # +MOV = 经济差软标签（修订 A6）
     assert h["n_champions"] == 173
     assert h["n_known_players"] > 5000 and h["n_known_teams"] > 1000
     assert h["run_id"]                      # 回滚时用它确认换了实例

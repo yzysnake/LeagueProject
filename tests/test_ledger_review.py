@@ -220,3 +220,16 @@ def test_live_games_start_time_falls_back_to_the_prediction(tmp_path):
     p = _pred("g", 0.5, ["T1", "BLG"], "T1", "BLG", at="2026-10-20 10:04:00")
     df = live_games(_silver(), _write(tmp_path, [p, _lineup("g", None)]))
     assert str(df.kickoff_utc.iloc[0]) == "2026-10-20 10:04:00+00:00"
+
+
+def test_live_games_margin_label_from_final_gold(tmp_path):
+    """台账的局也带赛后经济差软标签：终局总经济取对账记下的 feed 终局帧，时长 = 终局 − 首帧；缺了退回胜负。"""
+    from lolwp.live.ledger import live_games
+    from lolwp.models.margin import margin_target
+
+    gold = {**_lineup("g", "2026-10-20T10:00:00.000Z", end="2026-10-20T10:30:00.000Z"),
+            "blue_gold": 60_000, "red_gold": 52_000}
+    no_gold = _lineup("h", "2026-10-20T12:00:00.000Z", blue_won=False, end="2026-10-20T12:30:00.000Z")
+    df = live_games(_silver(), _write(tmp_path, [gold, no_gold])).set_index("game_id")
+    assert df.loc["live:g", "y_margin"] == pytest.approx(margin_target([1], [60_000], [52_000], [1_800])[0])
+    assert df.loc["live:h", "y_margin"] == 0.0
