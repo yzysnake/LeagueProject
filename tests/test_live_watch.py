@@ -451,8 +451,9 @@ def test_backfill_skips_games_older_than_the_rating_snapshot(tmp_path, monkeypat
 
 def test_record_carries_the_ratings_snapshot():
     lw = _load_lw()
-    r = lw._record({"game_id": "g"}, {"p_blue": 0.5}, "BT4_LR@2026-09-18", "2026-10-24 21:30")
+    r = lw._record({"game_id": "g"}, {"p_blue": 0.5, "p_base": 0.47}, "BT4_LR@2026-09-18", "2026-10-24 21:30")
     assert (r["model"], r["ratings"]) == ("BT4_LR@2026-09-18", "2026-10-24 21:30")
+    assert r["p_base"] == 0.47              # 加近期状态之前的概率：之后近期状态的残差用它算
 
 
 def test_refresh_ratings_swaps_the_artifact_and_never_raises(capsys):

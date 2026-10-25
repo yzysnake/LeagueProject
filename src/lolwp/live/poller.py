@@ -61,6 +61,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -471,6 +472,8 @@ class Poller:
             pred = _predict_fn(self.artifact, d)
             out.update({
                 "p_blue": pred.p_blue,
+                # 加近期状态之前的概率：盯盘落盘后，近期状态的残差用它算（与训练时口径一致）
+                "p_base": 1.0 / (1.0 + math.exp(-(pred.logit - pred.contributions.get("form_diff", 0.0)))),
                 "logit": pred.logit,
                 "layers": pred.layers,
                 "contributions": pred.contributions,

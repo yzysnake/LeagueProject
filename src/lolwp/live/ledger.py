@@ -41,7 +41,7 @@ LIVE_PREFIX = "live:"
 # 30 分钟的护栏挡得住同一局算两遍，又不会误伤同系列的下一局。
 LIVE_GUARD = pd.Timedelta(minutes=30)
 LIVE_COLUMNS = ["game_id", "kickoff_utc", "ended_utc", "league_canon", "league_tier", "blue_team_id",
-                "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win", "y_margin"]
+                "red_team_id", "blue_player_ids", "red_player_ids", "y_blue_win", "y_margin", "p_pre"]
 _FALLBACK = "fallback:"
 
 
@@ -199,6 +199,8 @@ def live_games(silver: pd.DataFrame, path: str = LEDGER) -> pd.DataFrame:
     没见过的赛区按 0（不参与「主场赛区」的推断以外的任何口径）。
     y_margin = 赛后经济差软标签（models.margin），终局经济取对账记下的 feed 终局帧，时长 = 终局 − 首帧；
     缺了就退回胜负，和 silver 一样。
+    p_pre = 开赛前落盘的蓝方胜率，给近期状态（models.form）算残差：有 p_base（加近期状态之前的概率）用它，
+    更早的记录没有这一项、当时也还没有近期状态这一层，就用 p_blue；没有预测的局为 NaN。
     """
     from lolwp.models.margin import margin_target
 
@@ -239,6 +241,7 @@ def live_games(silver: pd.DataFrame, path: str = LEDGER) -> pd.DataFrame:
             "blue_team_id": bt, "red_team_id": rt,
             "blue_player_ids": _players(res, "blue"), "red_player_ids": _players(res, "red"),
             "y_blue_win": int(res["blue_won"]), "y_margin": float(y_margin),
+            "p_pre": _num(p.get("p_base", p.get("p_blue"))),
         })
     df = pd.DataFrame(rows, columns=LIVE_COLUMNS)
     for c in ("kickoff_utc", "ended_utc"):

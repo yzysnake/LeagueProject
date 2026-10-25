@@ -57,6 +57,8 @@ def render() -> None:
             + f'<div style="color:var(--lw-faint);font-size:.8rem;margin-top:10px">标准化系数；截距 {art.intercept:+.4f}。'
               "外层朴素，复杂度全在特征怎么算出来：分层 Bradley-Terry 选手潜变量 / 配合 / 赛区校准 + 两层经验贝叶斯的英雄版本强度。"
               + ("分层 BT 用历史局的终局经济差做软标签：险胜和碾压分开记，本局的赛后统计照旧不进模型。" if mov else "")
+              + (f"外层之上还有一层近期状态：两队最近几局「赛果 − 模型预期」之差 × {form['beta']:.2f}"
+                 "（含本系列已打完的局）。" if (form := art.prior_state.get("form")) else "")
               + "CatBoost、DeepSet、集成都试过，无一在 MDE 之上胜过它。</div></div>")
     with c2:
         ui.section("主要结论是一个负结果", "预注册时就允许为负")

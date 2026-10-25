@@ -235,6 +235,10 @@ make backfill DAYS=30 LEAGUE=Worlds
 写回 `models/prod.json`；外层系数、其余状态、`trained_on` 都不动，meta 里记 `ratings_as_of` /
 `ratings_cutoff` / `n_live_games`，台账每条预测记 `ratings`（当时快照的时刻）。
 
+近期状态那一层（修订 A7，`models/form.py`）的台账部分也在这一步重建：残差用开赛前落盘的 `p_base`
+（加这一层之前的概率）。它一半的增益来自本系列已打完的局，所以有比赛在盯时对账改成每 3 分钟一次，
+第 1 局的赛果赶在第 2 局 BP 结束、出预测之前进去（局间约 10 分钟）。
+
 两条代价，都是刻意的：首次重解之前没补的局（10/25 时其他赛区约 530 局，EMEA Masters、WSCI、DCGI 居多）
 不能再补成预测；它们的赛果对快照仍有用，留作后续（只记赛果、不出预测）。
 状态机（side 先验、英雄版本强度）不跟着台账重解：它们要 patch 与选手英雄计数，变化也慢，跟 `make artifact` 走。

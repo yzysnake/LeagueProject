@@ -17,9 +17,10 @@
 模型补出预测——和实时算的是同一个数（只用阵容，不读任何赛中数据），只是落盘晚，
 记录带 `source: "backfill"`，在「近期战绩」里归入「赛后补录」，可以一键排除。
 
-**实力快照随赛果重解**：盯盘每 30 分钟对账一次，对账时把这局的阵容解析成 OE id 写进 result；
-有新赛果就 `artifact.refresh()`（几秒，外层系数不动）并换上新 artifact。快照冻结一个月
-log loss 就差 0.012（reports/exp_model_improvements.md §1.2），OE 断更时只能靠这条路。
+**实力快照随赛果重解**：盯盘每 30 分钟（有比赛在盯时每 3 分钟）对账一次，对账时把这局的阵容解析成 OE id
+写进 result；有新赛果就 `artifact.refresh()`（几秒，外层系数不动）并换上新 artifact。快照冻结一个月
+log loss 就差 0.012（reports/exp_model_improvements.md §1.2），OE 断更时只能靠这条路。近期状态那一层
+（models.form）也在这一步跟着更新：第 1 局打完、第 2 局出预测之前，第 1 局的赛果就要进去。
 """
 from __future__ import annotations
 
@@ -37,6 +38,9 @@ KEY = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
 WAKE_GAP_S = 120          # 一轮间隔超过这么久 = 机器刚从睡眠里醒来
 SCHEDULE_MAX_PAGES = 12   # getSchedule 每页 80 场，12 页约覆盖一个月
 RECONCILE_EVERY_S = 1800  # 盯盘中每 30 分钟对账一次：有新赛果就重解实力快照
+# 有比赛在盯时每 3 分钟对一次：近期状态有一半的增益来自本系列已打完的局，
+# 第 1 局的赛果要赶在第 2 局 BP 结束、出预测之前进快照（局间约 10 分钟）
+RECONCILE_LIVE_S = 180
 
 
 def _now() -> str:
@@ -321,7 +325,7 @@ def _record(g: dict, pr: dict, model: str | None = None, ratings: str | None = N
     return {"kind": "prediction", "game_id": str(g.get("game_id")), "model": model,
             "ratings": ratings, "match_id": g.get("match_id"), "recorded_at": _now(),
             "league": g.get("league"), "teams": g.get("teams"),
-            "p_blue": pr.get("p_blue"), "layers": pr.get("layers"),
+            "p_blue": pr.get("p_blue"), "p_base": pr.get("p_base"), "layers": pr.get("layers"),
             "blue_champ_keys": pr.get("blue_champ_keys"),
             "red_champ_keys": pr.get("red_champ_keys"),
             "blue_names": pr.get("blue_names"), "red_names": pr.get("red_names"),
@@ -544,7 +548,8 @@ def watch(hours: float) -> int:
                 backfill(pol, s, backfill_from, seen=seen)
                 backfill_from = None
             # 补录之后才对账、重解：补录站在开局时刻预测，先重解就会让刚醒来要补的局用上之后的赛果
-            if time.time() - last_reconcile > RECONCILE_EVERY_S:
+            every = RECONCILE_LIVE_S if pol.health()["n_watched"] else RECONCILE_EVERY_S
+            if time.time() - last_reconcile > every:
                 last_reconcile = time.time()
                 if reconcile(pol.resolver, quiet=True) and (msg := _refresh_ratings(pol)):
                     print(msg, flush=True)
