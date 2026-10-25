@@ -13,14 +13,14 @@ LEDGER = ROOT / "reports" / "retest_ledger.jsonl"
 
 
 def test_every_parked_hypothesis_is_registered():
-    """项目里写过「暂不采纳、待重测」的四个假设，必须都在台账里。
+    """项目里写过「暂不采纳、待重测」的假设，必须都在台账里。
 
     漏登记一个，它就永远不会被复查。
     """
     from lolwp.ops.backlog import REGISTRY
     keys = {h.key for h in REGISTRY}
     for k in ["counter_reliability", "synergy_reliability",
-              "series_score_diff", "mastery_diff"]:
+              "series_score_diff", "mastery_diff", "role_pair_synergy"]:
         assert k in keys, f"{k} 未登记，将永远不会被复查"
 
 

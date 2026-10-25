@@ -22,25 +22,28 @@ WIN = "y_blue_win"
 MARGIN_KAPPA = 0.5
 
 
-def margin_target(y, blue_gold, red_gold, seconds, kappa: float = MARGIN_KAPPA) -> np.ndarray:
-    """逐场软标签；经济或时长缺失（或时长不为正）的位置退回 y。"""
+def margin_target(y, blue_gold, red_gold, seconds, kappa: float = MARGIN_KAPPA, lam: float = 1.0) -> np.ndarray:
+    """逐场软标签 (1 − λ)·y + λ·σ(κ·Δ)；经济或时长缺失（或时长不为正）的位置退回 y。
+    生产用 λ=1（只用软标签）；λ < 1 只给设定的对照实验（scripts/exp_margin_bt.py）。"""
     y = np.asarray(y, dtype=float)
     bg, rg, s = (np.asarray(v, dtype=float) for v in (blue_gold, red_gold, seconds))
     with np.errstate(divide="ignore", invalid="ignore"):
         d = (bg - rg) / 1000.0 / (s / 600.0)
     soft = 1.0 / (1.0 + np.exp(-kappa * d))
-    return np.where(np.isfinite(soft) & (s > 0), soft, y)
+    return np.where(np.isfinite(soft) & (s > 0), (1.0 - lam) * y + lam * soft, y)
 
 
-def with_margin_target(games: pd.DataFrame, margins: pd.DataFrame | None = None) -> pd.DataFrame:
-    """silver 口径的比赛表加一列 y_margin。margins 缺省读 data/silver/margins.parquet（store.margins）。"""
+def with_margin_target(games: pd.DataFrame, margins: pd.DataFrame | None = None, *,
+                       kappa: float = MARGIN_KAPPA, lam: float = 1.0, column: str = TARGET) -> pd.DataFrame:
+    """silver 口径的比赛表加一列软标签（缺省 y_margin，生产的 λ=1、κ=0.5）。
+    margins 缺省读 data/silver/margins.parquet（store.margins）。"""
     if margins is None:
         from lolwp.store.margins import load
 
         margins = load()
     m = margins.reindex(games.game_id.astype(str))
     out = games.copy()
-    out[TARGET] = margin_target(games[WIN].to_numpy(), m.blue_gold.to_numpy(), m.red_gold.to_numpy(),
-                                m.gamelength_s.to_numpy())
+    out[column] = margin_target(games[WIN].to_numpy(), m.blue_gold.to_numpy(), m.red_gold.to_numpy(),
+                                m.gamelength_s.to_numpy(), kappa=kappa, lam=lam)
     out.attrs = dict(games.attrs)
     return out

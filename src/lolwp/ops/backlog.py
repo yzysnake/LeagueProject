@@ -115,6 +115,37 @@ def _mde_gate(extra_cols: list[str], label: str) -> dict[str, Any]:
                        "rho": float(pw["icc"]), "n_series": int(pw["n_series"])}}
 
 
+def _stack_gate(variants: dict[str, Callable[[pd.DataFrame, Any], Any]], label: str) -> dict[str, Any]:
+    """在**当前生产规格**（软标签 BT4_LR + 近期状态）之上叠一层：logit q' = logit q + γ·f，
+    γ 只用更早的 fold 拟合；几个设定之间逐折滚动选（默认协议，修订 A8）；看验收段 ΔlogLoss 是否超过 MDE。
+    variants：设定名 → feature(oos, p)，返回与 oos 同序的数组，p 是外层的 OOS 概率（残差基准）；
+    第一个是事先最合理的设定（历史不足时用它）。"""
+    from lolwp.eval.gate import production_oos, select_and_gate, stack_walk_forward
+    from lolwp.models.form import fit_beta
+
+    b = production_oos("accept")
+    preds = {nm: stack_walk_forward(b["q"], fn(b["oos"], b["p"]), b["y"], b["fold"], fit_beta)[0]
+             for nm, fn in variants.items()}
+    r = select_and_gate(preds, b["q"], b["y"], b["fold"], b["oos"].kickoff_utc.to_numpy(), b["series"])
+    return {"n_games": r["n_games"], "statistic": r["delta"], "threshold": r["mde"],
+            "detail": {"label": label, "protocol": r["protocol"], "picks": r["picks"],
+                       "t_clustered": r["t_clustered"], "half_1": r["half_1"], "half_2": r["half_2"],
+                       "n_series": r["n_series"]}}
+
+
+def _role_pairs(k: float, hl: float) -> Callable[[pd.DataFrame, Any], Any]:
+    def f(oos: pd.DataFrame, p: Any) -> Any:
+        from lolwp.features.role_pairs import role_pair_synergy
+
+        return role_pair_synergy(oos, p, k, hl)
+    return f
+
+
+# 位置搭配协同的 4 个设定（收缩 k × 半衰期天数）；第一个是 2016–2018 上选出的那个
+ROLE_PAIR_VARIANTS = {"k30 hl730": _role_pairs(30.0, 730.0), "k10 hl730": _role_pairs(10.0, 730.0),
+                      "k30 hl180": _role_pairs(30.0, 180.0), "k10 hl180": _role_pairs(10.0, 180.0)}
+
+
 REGISTRY: list[Hypothesis] = [
     Hypothesis(
         key="counter_reliability",
@@ -142,6 +173,17 @@ REGISTRY: list[Hypothesis] = [
                    "后半段 +0.00100（MDE 0.00112, t=2.51），余量 0.89×，"
                    "**全项目最接近通过的一次近失**。",
         run=lambda: _mde_gate(["series_score_diff"], "series_score_diff"),
+    ),
+    Hypothesis(
+        key="role_pair_synergy",
+        title="三组位置搭配的英雄协同（ADC+辅助、打野+上单、打野+中单）",
+        gate="ΔlogLoss > 该比较自测的 MDE（叠在当前生产规格之上的第二层）",
+        threshold=0.0,
+        why_parked="2026-10-25 实测：4 个设定（收缩 k × 半衰期）逐折滚动选，验收段 +0.00044"
+                   "（MDE 0.00057，余量 0.77×，t=2.15），两半同号且后半更强；按调参段选一次是 +0.00044（0.82×），"
+                   "调参段本身为负。ADC+辅助一组贡献最多（+0.00024，0.62×），打野两组各约 +0.0001 且两半翻面。"
+                   "趋势在往显著走，等数据积累。",
+        run=lambda: _stack_gate(ROLE_PAIR_VARIANTS, "role_pair_synergy"),
     ),
     Hypothesis(
         key="mastery_diff",

@@ -19,6 +19,8 @@
   没有这个字段的按它算（LEGACY_MODEL）。
 - 台账由另一个进程追加，单行可能损坏（磁盘写满、手改）。坏行跳过并计数（df.attrs），
   不能让一行坏数据把整页带崩。
+- `rating_only: true` 的 result 没有对应的预测：盯盘漏掉、开局又早于实力快照截止的局补不了预测，
+  只补赛果（scripts/live_watch.py 的 backfill_results），给实力快照用；「近期战绩」只看有预测的局，不看它。
 - 对账时会把这一局的阵容解析成 OE 的队伍 / 选手 id 写进 result（`blue_oe_team` …），
   `live_games` 据此把 OE 还没收录的局拼成和 silver 同形的行，给实力快照重解用。
 """

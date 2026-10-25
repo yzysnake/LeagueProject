@@ -36,7 +36,7 @@ API = "https://esports-api.lolesports.com/persisted/gw"
 FEED = "https://feed.lolesports.com/livestats/v1"
 KEY = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
 WAKE_GAP_S = 120          # 一轮间隔超过这么久 = 机器刚从睡眠里醒来
-SCHEDULE_MAX_PAGES = 12   # getSchedule 每页 80 场，12 页约覆盖一个月
+SCHEDULE_MAX_PAGES = 40   # getSchedule 每页 80 场、约两三天；翻到早于 since 就停，这只是防死循环的上限
 RECONCILE_EVERY_S = 1800  # 盯盘中每 30 分钟对账一次：有新赛果就重解实力快照
 # 有比赛在盯时每 3 分钟对一次：近期状态有一半的增益来自本系列已打完的局，
 # 第 1 局的赛果要赶在第 2 局 BP 结束、出预测之前进快照（局间约 10 分钟）
@@ -79,7 +79,7 @@ def _ts(t: datetime) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _feed_game(s, gid: str) -> dict | None:
+def _feed_game(s, gid: str, pause_s: float = 0.0) -> dict | None:
     """从 livestats 读这一局：蓝红方队伍、开局 / 终局时间、终局帧判出的胜负。拿不到 window → None。
 
     **蓝红方以 feed 为准**：预测的 p_blue 是 feed 的 blueTeamMetadata 那一方的胜率，
@@ -90,6 +90,7 @@ def _feed_game(s, gid: str) -> dict | None:
     **恰好一方 inhibitors>0** 时胜方无歧义。双方都>0 或都为 0（投降）→ blue_won=None，不猜。
     window 每次只返回 ~10 秒的帧，从首帧起每 5 分钟往后跳；跳过终局后 feed 一直回最后几帧，
     所以帧不再前进 = 这局 feed 停在了对局中途、没有 finished 帧，不必再跳。
+    pause_s：两次 window 之间歇一下（成批补录几百局时用，别把 feed 当压测）。
     """
     from datetime import timedelta
 
@@ -111,6 +112,7 @@ def _feed_game(s, gid: str) -> dict | None:
     t0 = t0.replace(second=t0.second // 10 * 10, microsecond=0)  # startingTime 须是 10 秒整
     last = None
     for mins in range(5, 125, 5):
+        time.sleep(pause_s)
         r = s.get(f"{FEED}/window/{gid}", params={"startingTime": _ts(t0 + timedelta(minutes=mins))},
                   timeout=20)
         frames = (r.json().get("frames") or []) if r.status_code == 200 and r.content else []
@@ -196,6 +198,40 @@ def _lineup(resolver, payload: dict, league: str | None) -> dict:
             "blue_oe_players": list(rg.blue.player_ids), "red_oe_players": list(rg.red.player_ids)}
 
 
+def _result_fields(fg: dict, teams: list, resolver, league: str | None) -> dict:
+    """一局打完的局要写进 result 的字段：feed 的蓝红方（队伍代码）、开局 / 终局时间、终局经济、能解析时的阵容。"""
+    code = {t["id"]: t.get("code") for t in teams}
+    ids = set(code)
+    return {"blue_team": code.get(fg["blue_id"]) if fg["blue_id"] in ids else None,
+            "red_team": code.get(fg["red_id"]) if fg["red_id"] in ids else None,
+            "started_at": fg["started_at"], "ended_at": fg["ended_at"],
+            "blue_gold": fg["blue_gold"], "red_gold": fg["red_gold"],
+            **(_lineup(resolver, fg["payload"], league) if resolver is not None else {})}
+
+
+def _verdict(fg: dict, gm: dict, games: list, teams: list) -> tuple[bool | None, str | None, str | None]:
+    """逐局胜负 → (blue_won, 来源, 胜方队名)。
+
+    ⚠️ getEventDetails 的 games[].teams[] **只有 id 和 side，没有逐局胜负**，side 也不可信。
+       两路独立来源：livestats 终局帧（_feed_game）与系列比分（_series_blue_won），
+       蓝红方一律用 feed 的 esportsTeamId；都有答案却打架 → 留空，不猜。
+    """
+    ids = {t["id"] for t in teams}
+    blue_id = fg["blue_id"] if fg["blue_id"] in ids else None
+    red_id = fg["red_id"] if fg["red_id"] in ids else None
+    by_feed = fg["blue_won"]
+    by_series = _series_blue_won(gm, games, teams, blue_id)
+    if by_feed is not None and by_series is not None and by_feed != by_series:
+        print(f"  {gm.get('id')} 终局帧与系列比分矛盾，留空", file=sys.stderr)
+        blue_won, source = None, "conflict"
+    elif by_feed is not None:
+        blue_won, source = by_feed, "feed+series" if by_series is not None else "feed"
+    else:
+        blue_won, source = by_series, "series" if by_series is not None else None
+    win_id = None if blue_won is None else (blue_id if blue_won else red_id)
+    return blue_won, source, next((t.get("name") for t in teams if t["id"] == win_id), None)
+
+
 def reconcile(resolver=None, *, quiet: bool = False, pause_s: float = 0.5) -> int:
     """拉赛程结果，与已记录的预测对账。返回这次往台账里追加的 result 条数（新判出 + 补字段）。
 
@@ -243,18 +279,8 @@ def reconcile(resolver=None, *, quiet: bool = False, pause_s: float = 0.5) -> in
                 # feed 暂时拿不到：蓝红方无从和预测对齐，下次再试
                 n_pending += 0 if refill else 1
                 continue
-            # ⚠️ getEventDetails 的 games[].teams[] **只有 id 和 side，没有逐局胜负**，side 也不可信。
-            #    两路独立来源：livestats 终局帧（_feed_game）与系列比分（_series_blue_won），
-            #    蓝红方一律用 feed 的 esportsTeamId；都有答案却打架 → 留空，不猜。
             teams = (ev.get("match") or {}).get("teams") or []
-            ids = {t["id"] for t in teams}
-            blue_id = fg["blue_id"] if fg["blue_id"] in ids else None
-            red_id = fg["red_id"] if fg["red_id"] in ids else None
-            code = {t["id"]: t.get("code") for t in teams}
-            extra = {"blue_team": code.get(blue_id), "red_team": code.get(red_id),
-                     "started_at": fg["started_at"], "ended_at": fg["ended_at"],
-                     "blue_gold": fg["blue_gold"], "red_gold": fg["red_gold"],
-                     **(_lineup(resolver, fg["payload"], p.get("league")) if resolver is not None else {})}
+            extra = _result_fields(fg, teams, resolver, p.get("league"))
             if refill:
                 if fg["blue_won"] is not None and fg["blue_won"] != prev["blue_won"]:
                     print(f"  {gid} 终局帧与已记录的胜负矛盾，未补字段", file=sys.stderr)
@@ -264,20 +290,10 @@ def reconcile(resolver=None, *, quiet: bool = False, pause_s: float = 0.5) -> in
                 _append({**prev, "recorded_at": _now(), **extra})
                 n_fill += 1
                 continue
-            by_feed = fg["blue_won"]
-            by_series = _series_blue_won(gm, games, teams, blue_id)
-            if by_feed is not None and by_series is not None and by_feed != by_series:
-                print(f"  {gid} 终局帧与系列比分矛盾，留空", file=sys.stderr)
-                blue_won, source = None, "conflict"
-            elif by_feed is not None:
-                blue_won, source = by_feed, "feed+series" if by_series is not None else "feed"
-            else:
-                blue_won, source = by_series, "series" if by_series is not None else None
+            blue_won, source, winner = _verdict(fg, gm, games, teams)
             if blue_won is None and prev is not None:
                 n_pending += 1
                 continue  # 仍判不出，不重复追加空记录
-            win_id = None if blue_won is None else (blue_id if blue_won else red_id)
-            winner = next((t.get("name") for t in teams if t["id"] == win_id), None)
             _append({"kind": "result", "game_id": gid, "recorded_at": _now(),
                      "game_winner": winner, "blue_won": blue_won, "source": source,
                      "p_blue": p.get("p_blue"), "teams": p.get("teams"), **extra})
@@ -484,6 +500,69 @@ def backfill(pol, s, since: datetime, *, league: str | None = None,
     return n
 
 
+# 只补赛果时，本进程里已确定不收的局（feed 没有、开局不在 (训练截止, 快照截止] 区间、判不出胜负）
+_SKIP_RESULTS: set[str] = set()
+
+
+def backfill_results(s, since: datetime, resolver, *, trained_on: datetime, cutoff: datetime,
+                     league: str | None = None, pause_s: float = 0.5, feed_pause_s: float = 0.25) -> int:
+    """只补赛果、不补预测：盯盘漏掉的、开局在 (训练截止, 实力快照截止] 之间的已完赛局。返回写了几局。
+
+    这些局补不了预测——快照已经吃了它开打之后的赛果，补出来的不是样本外预测（见 backfill）；
+    但它们的赛果对快照照样有用。写成**没有预测**的 result（`rating_only: true`）：
+    「近期战绩」只看有预测的局，不受影响；`ledger.live_games` 照常把它拼进实力快照
+    （阵容解析出、两队对照可信的才收）。开局早于训练截止的局 OE 里已经有了，不写；
+    胜负由终局帧与系列比分两路判（同对账，_verdict），判不出的不写；台账里已有这一局的跳过。
+    """
+    preds, results = _load_ledger()
+    seen = set(preds) | set(results)
+    n = 0
+    for ev in _schedule(s, since):
+        m = ev.get("match") or {}
+        mid = str(m.get("id") or "")
+        if (not mid or ev.get("state") not in ("completed", "inProgress")
+                or _utc(ev.get("startTime")) < max(since, trained_on - timedelta(hours=12))
+                or (league and (ev.get("league") or {}).get("name") != league)):
+            continue
+        try:
+            d = s.get(f"{API}/getEventDetails", params={"hl": "en-US", "id": mid}, timeout=20).json()
+        except Exception as e:  # noqa: BLE001
+            print(f"  补赛果：getEventDetails({mid}) 失败：{type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        det = (d.get("data") or {}).get("event") or {}
+        name = (det.get("league") or {}).get("name") or (ev.get("league") or {}).get("name")
+        match = det.get("match") or m
+        games, teams = match.get("games") or [], match.get("teams") or []
+        for gm in games:
+            gid = str(gm.get("id") or "")
+            if not gid or gid in seen or gid in _SKIP_RESULTS or gm.get("state") != "completed":
+                continue
+            try:
+                fg = _feed_game(s, gid, pause_s=feed_pause_s)
+                time.sleep(pause_s)
+                start = _utc(fg["started_at"]) if fg and fg.get("started_at") else None
+                if start is None or not (trained_on < start <= cutoff):
+                    _SKIP_RESULTS.add(gid)
+                    continue
+                blue_won, source, winner = _verdict(fg, gm, games, teams)
+                if blue_won is None:
+                    _SKIP_RESULTS.add(gid)
+                    continue
+                _append({"kind": "result", "game_id": gid, "match_id": mid, "recorded_at": _now(),
+                         "rating_only": True, "league": name, "teams": [t.get("code") for t in teams],
+                         "game_winner": winner, "blue_won": blue_won, "source": source,
+                         **_result_fields(fg, teams, resolver, name)})
+                seen.add(gid)
+                n += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"  补赛果 {gid} 失败：{type(e).__name__}: {e}", file=sys.stderr)
+    return n
+
+
+def _trained_on(pol) -> datetime:
+    return _utc(str(pol.artifact.meta.get("trained_on")).replace(" ", "T"))
+
+
 def _session():
     import requests
 
@@ -546,6 +625,10 @@ def watch(hours: float) -> int:
                       flush=True)
             if backfill_from is not None:
                 backfill(pol, s, backfill_from, seen=seen)
+                # 补不了预测的（开局早于快照截止）只补赛果，进实力快照
+                if backfill_results(s, backfill_from, pol.resolver, trained_on=_trained_on(pol),
+                                    cutoff=_ratings_cutoff(pol)) and (msg := _refresh_ratings(pol)):
+                    print(msg, flush=True)
                 backfill_from = None
             # 补录之后才对账、重解：补录站在开局时刻预测，先重解就会让刚醒来要补的局用上之后的赛果
             every = RECONCILE_LIVE_S if pol.health()["n_watched"] else RECONCILE_EVERY_S
@@ -575,7 +658,8 @@ def main() -> int:
     ap.add_argument("--hours", type=float, default=16.0)
     ap.add_argument("--reconcile", action="store_true", help="只对账，不盯盘")
     ap.add_argument("--backfill", action="store_true",
-                    help="只补录：赛程里已打完、台账里没有的局（之后自动对账）")
+                    help="只补录：赛程里已打完、台账里没有的局——补得了预测的补预测（之后自动对账），"
+                         "开局早于实力快照截止的只补赛果；然后重解实力快照")
     ap.add_argument("--days", type=float, default=14.0, help="补录往回看几天")
     ap.add_argument("--league", default=None, help="补录只看这个赛事（feed 名，如 Worlds）")
     a = ap.parse_args()
@@ -586,10 +670,16 @@ def main() -> int:
         from lolwp.live.poller import build_default_poller
 
         since = datetime.now(UTC) - timedelta(days=a.days)
-        n = backfill(build_default_poller(), _session(), since, league=a.league)
-        print(f"补录 {n} 局" + ("，执行一次对账：" if n else ""), flush=True)
+        pol, s = build_default_poller(), _session()
+        n = backfill(pol, s, since, league=a.league)
+        # 开局早于实力快照截止的局补不了预测，只补赛果（rating_only），进快照
+        k = backfill_results(s, since, pol.resolver, trained_on=_trained_on(pol),
+                             cutoff=_ratings_cutoff(pol), league=a.league)
+        print(f"补录预测 {n} 局，只补赛果 {k} 局" + ("，执行一次对账：" if n else ""), flush=True)
         if n:
-            reconcile()
+            reconcile(pol.resolver)
+        if (n or k) and (msg := _refresh_ratings(pol)):
+            print(msg, flush=True)
         return 0
     rc = watch(a.hours)
     print("\n盯盘结束，执行一次对账：", flush=True)
